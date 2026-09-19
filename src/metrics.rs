@@ -172,6 +172,16 @@ pub fn render(c: &Census, labels: &[(String, String)]) -> String {
         out.sample("relays_failed", &[("stage", s.label())], &n.to_string());
     }
 
+    out.family(
+        "relays_failed_connect",
+        "gauge",
+        "Relay entries that failed at the connect stage, by what the socket reported: timeout, refused, unreachable or other",
+    );
+    for r in crate::census::CONNECT_REASONS {
+        let n = c.relays_failed_connect.get(r).copied().unwrap_or(0);
+        out.sample("relays_failed_connect", &[("reason", r)], &n.to_string());
+    }
+
     out.family("blp", "gauge", "Pools by how many of their relays answered: none, some, or all");
     for r in Reach::ALL {
         let g = &c.blp_by_reach[r.label()];

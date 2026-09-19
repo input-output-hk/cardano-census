@@ -2,9 +2,9 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::asn::{AsInfo, AsnDb};
+use crate::asn::{special_use, AsInfo, AsnDb};
 use crate::net::format_host_port;
-use crate::pools::{PoolIndex, PoolMeta};
+use crate::pools::{operator_domain, PoolIndex, PoolMeta};
 use crate::probe::{Failed, Family, Outcome, Stage};
 use crate::resolve::{Endpoint, Entry};
 use crate::reversed::Shadow;
@@ -218,6 +218,8 @@ pub struct Census {
     pub relays_reachable_v4: u64,
     pub relays_reachable_v6: u64,
     pub relays_failed: BTreeMap<&'static str, u64>,
+    /// Connect-stage failures by what the socket reported.
+    pub relays_failed_connect: BTreeMap<&'static str, u64>,
     /// Answering entries by negotiated node-to-node version.
     pub n2n_versions: BTreeMap<String, VersionGroup>,
     pub ipv4: Ipv4Reversal,
@@ -276,6 +278,23 @@ pub const RTT_BOUNDS: [f64; 13] =
     [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0];
 pub const WITHIN_BOUNDS: [f64; 9] = [1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0];
 pub const LAG_BOUNDS: [f64; 8] = [0.0, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 1000.0];
+
+pub const CONNECT_REASONS: [&str; 4] = ["timeout", "refused", "unreachable", "other"];
+
+/// What the socket said when the connect stage failed. Refused means a live
+/// host with nothing on the port, unreachable a route that does not exist.
+pub fn connect_reason(error: &str) -> &'static str {
+    let e = error.to_ascii_lowercase();
+    if e.contains("timeout") || e.contains("timed out") {
+        "timeout"
+    } else if e.contains("refused") {
+        "refused"
+    } else if e.contains("unreachable") || e.contains("no route") {
+        "unreachable"
+    } else {
+        "other"
+    }
+}
 
 /// Does `candidate` say more about an entry than `current`? A tip beats any
 /// failure, and a faster tip beats a slower one.
@@ -340,6 +359,8 @@ pub fn build(
 
     let mut relays_failed: BTreeMap<&'static str, u64> =
         Stage::ALL.iter().map(|s| (s.label(), 0)).collect();
+    let mut relays_failed_connect: BTreeMap<&'static str, u64> =
+        CONNECT_REASONS.iter().map(|r| (*r, 0)).collect();
     let mut relays_reachable_v4 = 0;
     let mut relays_reachable_v6 = 0;
     for o in entry_outcome.iter().flatten() {
@@ -348,7 +369,12 @@ pub fn build(
                 Family::V4 => relays_reachable_v4 += 1,
                 Family::V6 => relays_reachable_v6 += 1,
             },
-            Err(f) => *relays_failed.entry(f.stage.label()).or_default() += 1,
+            Err(f) => {
+                *relays_failed.entry(f.stage.label()).or_default() += 1;
+                if f.stage == Stage::Connect {
+                    *relays_failed_connect.entry(connect_reason(&f.error)).or_default() += 1;
+                }
+            }
         }
     }
 
@@ -555,6 +581,7 @@ pub fn build(
         relays_reachable_v4,
         relays_reachable_v6,
         relays_failed,
+        relays_failed_connect,
         n2n_versions,
         ipv4,
 
@@ -619,12 +646,17 @@ fn ipv4_reversal(
 }
 
 /// Merge not-fully-reachable pools by identity, rank by stake, keep `limit`.
+/// Pools whose registration carries no ticker or name are merged by the
+/// domain their relays share, which is the only handle there is on them.
 fn outreach(pools: &[PoolStat], limit: usize) -> Vec<OutreachRow> {
     let mut rows: BTreeMap<String, OutreachRow> = BTreeMap::new();
     for p in pools.iter().filter(|p| p.reach != Reach::Full) {
-        let key = match &p.meta {
-            Some(m) => m.pool_id.clone(),
-            None => p.relays.join(", "),
+        let anonymous = p.meta.as_ref().is_none_or(|m| m.ticker.is_none() && m.name.is_none());
+        let domain = if anonymous { operator_domain(&p.relays) } else { None };
+        let key = match (&domain, &p.meta) {
+            (Some(d), _) => format!("domain:{d}"),
+            (None, Some(m)) => m.pool_id.clone(),
+            (None, None) => p.relays.join(", "),
         };
         let row = rows.entry(key.clone()).or_insert_with(|| OutreachRow {
             pool_id: match &p.meta {
@@ -632,7 +664,12 @@ fn outreach(pools: &[PoolStat], limit: usize) -> Vec<OutreachRow> {
                 None => p.relays.first().cloned().unwrap_or_default(),
             },
             ticker: p.meta.as_ref().and_then(|m| m.ticker.clone()).unwrap_or_default(),
-            name: p.meta.as_ref().and_then(|m| m.name.clone()).unwrap_or_default(),
+            name: p
+                .meta
+                .as_ref()
+                .and_then(|m| m.name.clone())
+                .or(domain.clone())
+                .unwrap_or_default(),
             reach: p.reach,
             pools: 0,
             relays_total: 0,
@@ -744,15 +781,17 @@ fn asn_groups(
         .collect();
 
     // Keyed by AS number, or by a bucket name for entries without one:
-    // `unresolved` never got an address, `unrouted` has one no AS announces.
+    // `unresolved` never got an address, `private` and `reserved` have one in
+    // special-use space, `unrouted` has a public one no AS announces.
     let mut by_asn: BTreeMap<String, AsnGroup> = BTreeMap::new();
     for (i, e) in entries.iter().enumerate() {
         let share = pool_stake(e.pool) / per_pool_total[e.pool].max(1) as f64;
         let reached = matches!(entry_outcome[i], Some(Ok(_)));
+        let bucket = |b: &str| (b.to_string(), b.to_string());
         let (key, name) = match (&entry_asn[i], entry_ip[i]) {
             (Some(a), _) => (a.asn.to_string(), a.name.clone()),
-            (None, Some(_)) => ("unrouted".to_string(), "unrouted".to_string()),
-            (None, None) => ("unresolved".to_string(), "unresolved".to_string()),
+            (None, Some(ip)) => bucket(special_use(ip).unwrap_or("unrouted")),
+            (None, None) => bucket("unresolved"),
         };
         let g = by_asn
             .entry(key.clone())
@@ -771,7 +810,7 @@ fn asn_groups(
     let mut metrics: Vec<AsnGroup> = Vec::new();
     let mut other = AsnGroup { asn: "other".into(), name: "other".into(), ..Default::default() };
     for g in &table {
-        if g.asn == "unrouted" || g.asn == "unresolved" || g.relays as usize >= min_relays {
+        if matches!(g.asn.as_str(), "private" | "reserved" | "unrouted" | "unresolved") || g.relays as usize >= min_relays {
             metrics.push(g.clone());
         } else {
             other.relays += g.relays;
@@ -961,5 +1000,50 @@ mod tests {
         );
         let none = ipv4_reversal(&entries, &outcomes, &Shadow::none(entries.len()), &[0, 1, 0], |_| 1.0);
         assert_eq!(none, Ipv4Reversal::default());
+    }
+
+    #[test]
+    fn connect_reasons_come_from_the_socket_error() {
+        assert_eq!(connect_reason("timeout"), "timeout");
+        assert_eq!(connect_reason("Connect error to 1.2.3.4:3001: Connection refused (os error 111)"), "refused");
+        assert_eq!(connect_reason("Connect error to 10.0.0.1:3001: Network unreachable (os error 101)"), "unreachable");
+        assert_eq!(connect_reason("Connect error to 1.2.3.4:3001: Host is unreachable (os error 113)"), "unreachable");
+        assert_eq!(connect_reason("Connect error to 1.2.3.4:3001: No route to host (os error 113)"), "unreachable");
+        assert_eq!(connect_reason("Invalid address: x"), "other");
+    }
+
+    fn pool_stat(index: usize, stake: f64, meta: Option<PoolMeta>, relays: &[&str]) -> PoolStat {
+        PoolStat {
+            index,
+            relative_stake: stake,
+            relays_total: relays.len(),
+            relays_reachable: 0,
+            reach: Reach::None,
+            fraction: 0.0,
+            weighted_fraction: 0.0,
+            fastest_rtt_ms: None,
+            meta,
+            relays_reversed: 0,
+            relays: relays.iter().map(|r| r.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn anonymous_pools_merge_by_relay_domain() {
+        let bare = |id: &str| Some(PoolMeta { pool_id: id.into(), ticker: None, name: None });
+        let named = Some(PoolMeta { pool_id: "pool1named".into(), ticker: Some("NMD".into()), name: None });
+        let pools = vec![
+            pool_stat(0, 0.03, bare("pool1a"), &["112.cardano.staked.cloud:3001"]),
+            pool_stat(1, 0.03, bare("pool1b"), &["113.cardano.staked.cloud:3001"]),
+            pool_stat(2, 0.02, named, &["r.staked.cloud:3001"]),
+            pool_stat(3, 0.01, bare("pool1c"), &["203.0.113.9:3001"]),
+        ];
+        let rows = outreach(&pools, 10);
+        let by_id: BTreeMap<&str, &OutreachRow> = rows.iter().map(|r| (r.pool_id.as_str(), r)).collect();
+        let staked = by_id["pool1a"];
+        assert_eq!((staked.pools, staked.name.as_str(), staked.stake_ratio), (2, "staked.cloud", 0.06));
+        assert_eq!(by_id["pool1named"].pools, 1, "a pool with a ticker keeps its own row");
+        assert_eq!(by_id["pool1c"].name, "", "an IP-only anonymous pool has no domain to merge on");
+        assert_eq!(rows.len(), 3);
     }
 }

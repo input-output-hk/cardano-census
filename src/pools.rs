@@ -135,6 +135,26 @@ pub struct Identity {
     pub reversed: usize,
 }
 
+/// The domain an operator's relays share: the last two labels of the first
+/// DNS relay, three when the second-last is a short registry label like `co`.
+/// None when every relay is an IP literal.
+pub fn operator_domain(relays: &[String]) -> Option<String> {
+    relays.iter().find_map(|r| {
+        let (host, _) = split(r);
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        if host.parse::<IpAddr>().is_ok() {
+            return None;
+        }
+        let labels: Vec<&str> = host.split('.').filter(|l| !l.is_empty()).collect();
+        let n = labels.len();
+        if n < 2 {
+            return None;
+        }
+        let keep = if n >= 3 && labels[n - 2].len() <= 3 && labels[n - 1].len() == 2 { 3 } else { 2 };
+        Some(labels[n - keep..].join("."))
+    })
+}
+
 fn reversed_key(address: &str, port: Option<u16>) -> Option<String> {
     let ip: std::net::Ipv4Addr = address.trim().parse().ok()?;
     Some(relay_key(&crate::reversed::reverse(ip).to_string(), port))
@@ -206,6 +226,16 @@ mod tests {
         // Only the shared relay: a tie, broken towards the smaller id.
         let tie = idx.identify([("shared.example.org", Some(3001))]);
         assert_eq!(tie.unwrap().meta.pool_id, "pool1aaa");
+    }
+
+    #[test]
+    fn operator_domain_takes_the_registrable_part_of_the_first_dns_relay() {
+        let s = |v: &[&str]| v.iter().map(|r| r.to_string()).collect::<Vec<_>>();
+        assert_eq!(operator_domain(&s(&["10.46.1.2:3001", "112.cardano.staked.cloud:3001"])).as_deref(), Some("staked.cloud"));
+        assert_eq!(operator_domain(&s(&["relay.pool.co.uk:3001"])).as_deref(), Some("pool.co.uk"));
+        assert_eq!(operator_domain(&s(&["_cardano._tcp.example.org"])).as_deref(), Some("example.org"));
+        assert_eq!(operator_domain(&s(&["[2001:db8::1]:3001", "1.2.3.4:3001"])), None);
+        assert_eq!(operator_domain(&s(&["localhost:3001"])), None);
     }
 
     #[test]
