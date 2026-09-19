@@ -60,6 +60,8 @@ All gauges, since each run is a fresh observation. Ratios are 0 to 1. `--label K
 | `cardano_census_chains`, `cardano_census_fork_tolerance_blocks` | Tip groups after merging tips within the tolerance, and the tolerance used |
 | `cardano_census_chain_relays{chain="main"\|"other"}`, `cardano_census_chain_stake_ratio{chain=...}` | Answering relays and stake on the main group and on all others |
 | `cardano_census_relays_within_blocks_of_tip{le}`, `cardano_census_stake_within_blocks_of_tip{le}` | Relays, and stake by each pool's most current relay, at most `le` blocks behind the highest tip. `le` in `0 1 2 5 10 50 100 1000 +Inf` |
+| `cardano_census_pool_stake_ratio{pool_id,ticker,name,reach,pools,relays_total,relays_reachable,relays}` | Stake of the operators with the most stake among pools not fully reachable, at most `--top-pools` rows |
+| `cardano_census_pools_indexed` | Pools the pool index named, 0 when no index was given |
 | `cardano_census_asn_db_ranges`, `cardano_census_asn_min_relays` | Ranges in the loaded AS database, 0 when none, and the fold threshold |
 | `cardano_census_asn_relays{asn,name}`, `cardano_census_asn_relays_reachable{asn,name}` | Relay entries hosted in each autonomous system, and how many returned a tip |
 | `cardano_census_asn_stake_ratio{asn,name}`, `cardano_census_asn_stake_reachable_ratio{asn,name}` | Stake hosted in each autonomous system, each pool split evenly over its relays, and the reachable part |
@@ -82,6 +84,12 @@ One probe carries no chain history, so a group far behind main cannot be told ap
 With `--asn-db` pointing at iptoasn.com's `ip2asn-combined.tsv`, public domain and updated hourly, every relay is placed in the autonomous system of the address that answered, or of the first address it resolved to when nothing did. That is what turns a list of failing addresses into "Hetzner relays are 40% unreachable, everyone else 10%".
 
 The `asn` series carry the AS number and its registry handle, the first word of the description, so the labels stay short and stable. Systems hosting fewer than `--asn-min-relays` relays, default 3, are folded into `asn="other"`, since a single relay down says nothing about its network. Relays that never resolved to an address land in `asn="unresolved"`, and relays whose address no system announces in `asn="unrouted"`, which is a registered relay pointing at dead address space. The report's `asn_table` has every system without the fold, and each relay carries its `asn` and `as_name`. No series is ever labelled by pool, relay or address.
+
+## Naming pools
+
+The snapshot names no pools, only stake shares and relays, so the census can rank unreachable pools but not say who they are. `--pool-index FILE` supplies that: a JSON array of `{pool_id, ticker, name, relays}` records built from the same ledger registrations, for example from db-sync's `pool_relay` rows, relays written as `host:port`, `[v6]:port` or a bare SRV name. Entries match by relay regardless of case, trailing dots or IP spelling.
+
+With or without an index, `cardano_census_pool_stake_ratio` names the `--top-pools` operators with the most stake among pools not fully reachable, default 25, with the pool id, ticker and name as labels when known and the first relay standing in for the id otherwise. A relay set registered by several pools is one operator: those pools share an identity, are merged into one row with a `pools` count, and their stake is summed, which is also what keeps every row a distinct series. The list is bounded on purpose, since the point is the short list worth contacting; the report carries the identity for every pool.
 
 ## Report
 
@@ -107,7 +115,7 @@ The `asn` series carry the AS number and its registry handle, the first word of 
 
 Set `snapshotFile` instead of `nodeSocket` to read a file. With a socket the service joins `nodeSocketGroup`, `cardano-node` by default, to reach it.
 
-The module runs the census every 15 minutes as a oneshot service under a dynamic user and writes to `/var/lib/cardano-census`. `interval`, `timeout`, `parallel`, `forkTolerance`, `labels`, `reportFile`, `textfileDirectory` and `extraArgs` are options.
+The module runs the census every 15 minutes as a oneshot service under a dynamic user and writes to `/var/lib/cardano-census`. `interval`, `timeout`, `parallel`, `forkTolerance`, `labels`, `poolIndex`, `topPools`, `reportFile`, `textfileDirectory` and `extraArgs` are options.
 
 It also keeps the AS database current: before each run it fetches `asnDatabase.url` when the local copy is older than `asnDatabase.maxAgeHours`, default a day, and a failed fetch keeps the previous copy. `asnDatabase.minRelays` sets the fold threshold and `asnDatabase.enable = false` turns the whole thing off.
 

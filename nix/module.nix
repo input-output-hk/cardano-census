@@ -127,6 +127,19 @@ in {
       };
     };
 
+    poolIndex = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "/var/lib/cardano-census/pool-index.json";
+      description = "JSON array of {pool_id, ticker, name, relays} records naming pools by their relays; see the README.";
+    };
+
+    topPools = mkOption {
+      type = types.ints.unsigned;
+      default = 25;
+      description = "How many not-fully-reachable pools to name in the outreach series, largest stake first; 0 disables.";
+    };
+
     labels = mkOption {
       type = types.attrsOf types.str;
       default = {};
@@ -183,6 +196,8 @@ in {
           ++ optionals fromNode ["--node-socket" cfg.nodeSocket]
           ++ optionals (cfg.networkMagic != null) ["--network-magic" (toString cfg.networkMagic)]
           ++ optionals (cfg.reportFile != null) ["--report" cfg.reportFile]
+          ++ ["--top-pools" (toString cfg.topPools)]
+          ++ optionals (cfg.poolIndex != null) ["--pool-index" cfg.poolIndex]
           ++ lib.concatLists (lib.mapAttrsToList (k: v: ["--label" "${k}=${v}"]) cfg.labels)
           ++ optionals cfg.asnDatabase.enable [
             "--asn-db"

@@ -248,6 +248,35 @@ pub fn render(c: &Census, labels: &[(String, String)]) -> String {
     );
 
     out.gauge(
+        "pools_indexed",
+        "Pools the pool index named, 0 when no index was given",
+        &c.pools_indexed.to_string(),
+    );
+    if !c.top_pools.is_empty() {
+        out.family(
+            "pool_stake_ratio",
+            "gauge",
+            "Operators with the most stake among pools not fully reachable, named for outreach; pools sharing an identity are one row, and pool_id falls back to the first relay without an index",
+        );
+        for p in &c.top_pools {
+            let relays = p.relays.join(", ");
+            out.sample(
+                "pool_stake_ratio",
+                &[
+                    ("pool_id", &p.pool_id),
+                    ("ticker", &p.ticker),
+                    ("name", &p.name),
+                    ("reach", p.reach.label()),
+                    ("pools", &p.pools.to_string()),
+                    ("relays_total", &p.relays_total.to_string()),
+                    ("relays_reachable", &p.relays_reachable.to_string()),
+                    ("relays", &relays),
+                ],
+                &num(p.stake_ratio),
+            );
+        }
+    }
+    out.gauge(
         "asn_db_ranges",
         "Ranges in the loaded ip2asn database, 0 when relays could not be placed in networks",
         &c.asn_db_ranges.to_string(),

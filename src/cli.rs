@@ -55,6 +55,14 @@ pub struct Args {
     #[arg(long, default_value_t = 3)]
     pub asn_min_relays: usize,
 
+    /// JSON array of {pool_id, ticker, name, relays} records naming pools by their relays
+    #[arg(long, value_name = "FILE")]
+    pub pool_index: Option<PathBuf>,
+
+    /// How many not-fully-reachable pools to name in the outreach series, largest stake first; 0 disables
+    #[arg(long, default_value_t = 25)]
+    pub top_pools: usize,
+
     /// Try IPv4 first instead of IPv6
     #[arg(long)]
     pub prefer_ipv4: bool,

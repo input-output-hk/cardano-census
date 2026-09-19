@@ -15,6 +15,12 @@ struct Report<'a> {
 #[derive(Serialize)]
 struct PoolReport {
     index: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pool_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ticker: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
     accumulated_stake: f64,
     relative_stake: f64,
     relays_total: usize,
@@ -133,6 +139,9 @@ pub fn render(
         .iter()
         .map(|p| PoolReport {
             index: p.index,
+            pool_id: p.meta.as_ref().map(|m| m.pool_id.clone()),
+            ticker: p.meta.as_ref().and_then(|m| m.ticker.clone()),
+            name: p.meta.as_ref().and_then(|m| m.name.clone()),
             accumulated_stake: snap.pools[p.index].accumulated_stake,
             relative_stake: p.relative_stake,
             relays_total: p.relays_total,

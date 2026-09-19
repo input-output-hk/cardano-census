@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::asn::{AsInfo, AsnDb};
+use crate::net::format_host_port;
+use crate::pools::{PoolIndex, PoolMeta};
 use crate::probe::{Failed, Family, Outcome, Stage};
 use crate::resolve::{Endpoint, Entry};
 use crate::snapshot::Snapshot;
@@ -97,6 +99,12 @@ pub struct PoolStat {
     /// targets: the chance a node choosing that record reaches a working one.
     pub weighted_fraction: f64,
     pub fastest_rtt_ms: Option<u64>,
+    /// From the pool index, when one was given and a relay matched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<PoolMeta>,
+    /// The pool's relay entries as written in the snapshot.
+    #[serde(skip)]
+    pub relays: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -146,6 +154,22 @@ pub struct AsnGroup {
 pub struct VersionGroup {
     pub relays: u64,
     pub stake_ratio: f64,
+}
+
+/// One line of the outreach list. Pools that share an identity, the same
+/// pool id from the index or, without one, the same relay set, are one
+/// operator and are merged, so every row is a distinct series.
+#[derive(Clone, Debug, Serialize)]
+pub struct OutreachRow {
+    pub pool_id: String,
+    pub ticker: String,
+    pub name: String,
+    pub reach: Reach,
+    pub pools: u64,
+    pub relays_total: u64,
+    pub relays_reachable: u64,
+    pub stake_ratio: f64,
+    pub relays: Vec<String>,
 }
 
 /// Where one relay entry's tip sits relative to the highest tip seen.
@@ -198,6 +222,10 @@ pub struct Census {
     pub relays_within_blocks_of_tip: Cumulative,
     pub stake_within_blocks_of_tip: Cumulative,
 
+    /// Pools the index named, 0 when no index was given.
+    pub pools_indexed: u64,
+    pub top_pools_limit: u64,
+
     /// Ranges in the AS database, 0 when none was loaded.
     pub asn_db_ranges: u64,
     pub asn_min_relays: u64,
@@ -209,6 +237,10 @@ pub struct Census {
 
     #[serde(skip)]
     pub pools: Vec<PoolStat>,
+    /// The operators with the most stake among pools not fully reachable,
+    /// for the outreach series; at most `top_pools_limit` of them.
+    #[serde(skip)]
+    pub top_pools: Vec<OutreachRow>,
     #[serde(skip)]
     pub entry_tips: Vec<Option<EntryTip>>,
     /// The AS table with small ASes folded into `other`, for the metrics.
@@ -280,6 +312,8 @@ pub fn build(
     fork_tolerance: u64,
     asn_db: Option<&AsnDb>,
     asn_min_relays: usize,
+    pool_index: Option<&PoolIndex>,
+    top_pools_limit: usize,
     scan: Duration,
     timestamp_seconds: u64,
 ) -> Census {
@@ -357,6 +391,17 @@ pub fn build(
             stake_reachable_within.observe(ms as f64 / 1000.0, p.relative_stake);
         }
 
+        let own_entries: Vec<&Entry> = entries.iter().filter(|e| e.pool == index).collect();
+        let meta = pool_index
+            .and_then(|idx| idx.identify(own_entries.iter().map(|e| (e.address.as_str(), e.port))));
+        let relays = own_entries
+            .iter()
+            .map(|e| match e.port {
+                Some(port) => format_host_port(&e.address, port),
+                None => e.address.clone(),
+            })
+            .collect();
+
         pools.push(PoolStat {
             index,
             relative_stake: p.relative_stake,
@@ -366,8 +411,13 @@ pub fn build(
             fraction,
             weighted_fraction,
             fastest_rtt_ms,
+            meta,
+            relays,
         });
     }
+
+    let pools_indexed = pools.iter().filter(|p| p.meta.is_some()).count() as u64;
+    let top_pools = outreach(&pools, top_pools_limit);
 
     let reachable_stake_ratio =
         blp_by_reach["partial"].stake_ratio + blp_by_reach["full"].stake_ratio;
@@ -500,6 +550,9 @@ pub fn build(
         relays_within_blocks_of_tip,
         stake_within_blocks_of_tip,
 
+        pools_indexed,
+        top_pools_limit: top_pools_limit as u64,
+
         asn_db_ranges: asn_db.map(|db| db.len() as u64).unwrap_or(0),
         asn_min_relays: asn_min_relays as u64,
         asn_table,
@@ -508,11 +561,53 @@ pub fn build(
         timestamp_seconds,
 
         pools,
+        top_pools,
         entry_tips,
         asn_metrics,
         entry_asn,
         entry_probability,
     }
+}
+
+/// Merge not-fully-reachable pools by identity, rank by stake, keep `limit`.
+fn outreach(pools: &[PoolStat], limit: usize) -> Vec<OutreachRow> {
+    let mut rows: BTreeMap<String, OutreachRow> = BTreeMap::new();
+    for p in pools.iter().filter(|p| p.reach != Reach::Full) {
+        let key = match &p.meta {
+            Some(m) => m.pool_id.clone(),
+            None => p.relays.join(", "),
+        };
+        let row = rows.entry(key.clone()).or_insert_with(|| OutreachRow {
+            pool_id: match &p.meta {
+                Some(m) => m.pool_id.clone(),
+                None => p.relays.first().cloned().unwrap_or_default(),
+            },
+            ticker: p.meta.as_ref().and_then(|m| m.ticker.clone()).unwrap_or_default(),
+            name: p.meta.as_ref().and_then(|m| m.name.clone()).unwrap_or_default(),
+            reach: p.reach,
+            pools: 0,
+            relays_total: 0,
+            relays_reachable: 0,
+            stake_ratio: 0.0,
+            relays: Vec::new(),
+        });
+        row.pools += 1;
+        row.relays_total += p.relays_total as u64;
+        row.relays_reachable += p.relays_reachable as u64;
+        row.stake_ratio += p.relative_stake;
+        if p.reach == Reach::Partial {
+            row.reach = Reach::Partial;
+        }
+        for r in &p.relays {
+            if !row.relays.contains(r) {
+                row.relays.push(r.clone());
+            }
+        }
+    }
+    let mut rows: Vec<OutreachRow> = rows.into_values().collect();
+    rows.sort_by(|a, b| b.stake_ratio.partial_cmp(&a.stake_ratio).unwrap_or(std::cmp::Ordering::Equal));
+    rows.truncate(limit);
+    rows
 }
 
 /// The chance a node using each entry reaches a working relay. A plain relay
