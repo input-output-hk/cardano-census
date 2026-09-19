@@ -10,6 +10,8 @@ cardano-census --snapshot peer-snapshot.json --output /var/lib/cardano-census/ca
 
 The snapshot is the `peerSnapshotV3` file cardano-node 11.x reads for its big ledger peers. Its `NetworkMagic` picks the network unless `--network-magic` overrides it.
 
+Progress goes to stderr, one line per phase, so a journal shows what a run is waiting on. A full mainnet run takes about a minute at the defaults.
+
 With `--node-socket` the snapshot is asked of a local cardano-node instead, over the node-to-client socket, so each run sees the pools the node itself would use. The socket carries no network identity, so `--network-magic` is required there. It takes a number or `mainnet`. There is no remote form of this query.
 
 ## What counts as reachable

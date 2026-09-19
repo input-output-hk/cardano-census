@@ -47,6 +47,7 @@ async fn run(args: &Args) -> Result<()> {
             let magic = args
                 .network_magic
                 .ok_or_else(|| anyhow::anyhow!("--node-socket needs --network-magic"))?;
+            eprintln!("asking {} for its big ledger peer snapshot", socket.display());
             let snap = node::fetch(socket, magic, Duration::from_secs(30)).await?;
             (snap, socket.display().to_string())
         }
@@ -55,22 +56,45 @@ async fn run(args: &Args) -> Result<()> {
     };
     let magic = args.network_magic.unwrap_or(snap.network_magic);
     let entries = resolve::entries(&snap, args.port);
+    eprintln!(
+        "snapshot from {source}: {} pools, {} relay entries, magic {}, N2C v{}, slot {}",
+        snap.pools.len(),
+        entries.len(),
+        snap.network_magic,
+        snap.node_to_client_version,
+        snap.point.block_point_slot,
+    );
 
     let started = Instant::now();
     let endpoints = resolve::resolve(&entries, args.parallel).await;
+    let unresolved = endpoints.iter().filter(|e| e.dns_error.is_some()).count();
+    eprintln!(
+        "resolved to {} endpoints in {:.1}s, {} names did not resolve",
+        endpoints.len(),
+        started.elapsed().as_secs_f64(),
+        unresolved,
+    );
 
     let timeout = Duration::from_secs(args.timeout);
+    let parallel = args.parallel.max(1);
     let mut order: Vec<usize> = (0..endpoints.len())
         .filter(|&i| endpoints[i].dns_error.is_none())
         .collect();
     order.shuffle(&mut rand::rng());
+    let waves = order.len().div_ceil(parallel) as u64;
+    eprintln!(
+        "probing {} endpoints, {parallel} at once, {}s budget each; finishes within {}s at worst",
+        order.len(),
+        args.timeout,
+        waves * args.timeout,
+    );
 
     let probed: Vec<(usize, Outcome)> = stream::iter(order)
         .map(|i| {
             let addr = endpoints[i].key.clone();
             async move { (i, probe::probe(&addr, magic, timeout).await) }
         })
-        .buffer_unordered(args.parallel.max(1))
+        .buffer_unordered(parallel)
         .collect()
         .await;
 

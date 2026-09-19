@@ -47,7 +47,17 @@ enum Failure {
     Query(anyhow::Error),
 }
 
+/// Longest unix socket path Linux accepts, sun_path less its terminator.
+const MAX_SOCKET_PATH: usize = 107;
+
 pub async fn fetch(socket: &Path, magic: u64, budget: Duration) -> Result<Snapshot> {
+    let len = socket.as_os_str().len();
+    if len > MAX_SOCKET_PATH {
+        bail!(
+            "socket path is {len} bytes, unix sockets allow {MAX_SOCKET_PATH}: {}",
+            socket.display()
+        );
+    }
     let first = match session(socket, magic, budget, QueryShape::Plain).await {
         Ok(snap) => return Ok(snap),
         Err(Failure::Setup(e)) => return Err(e),
