@@ -115,6 +115,10 @@ pub async fn resolve(entries: &[Entry], parallel: usize) -> Vec<Endpoint> {
             dns_error: r.dns_error.clone(),
         });
         ep.entries.push(r.idx);
+        // One good lookup for this name is enough to probe it.
+        if r.dns_error.is_none() {
+            ep.dns_error = None;
+        }
         for a in &r.addrs {
             ip_to_key.entry(a.clone()).or_insert_with(|| key.clone());
         }

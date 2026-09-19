@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Result};
 use pallas_network::multiplexer::Bearer;
+use std::fmt;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -22,6 +22,23 @@ fn happy_eyeballs_config() -> (bool, u64) {
     )
 }
 
+/// Why a connect attempt produced no bearer.
+#[derive(Debug)]
+pub enum ConnectError {
+    Dns(String),
+    Connect(String),
+    Timeout,
+}
+
+impl fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConnectError::Dns(m) | ConnectError::Connect(m) => f.write_str(m),
+            ConnectError::Timeout => f.write_str("timeout"),
+        }
+    }
+}
+
 /// host:port for display and keys, bracketing IPv6 literals.
 pub fn format_host_port(host: &str, port: u16) -> String {
     if host.starts_with('[') {
@@ -33,54 +50,51 @@ pub fn format_host_port(host: &str, port: u16) -> String {
     }
 }
 
-fn split_host_port(addr: &str) -> Result<(String, u16)> {
+fn split_host_port(addr: &str) -> Result<(String, u16), ConnectError> {
+    let invalid = || ConnectError::Connect(format!("Invalid address: {}", addr));
     if let Some(rest) = addr.strip_prefix('[') {
-        let end = rest.find(']').ok_or_else(|| anyhow!("Invalid address: {}", addr))?;
+        let end = rest.find(']').ok_or_else(invalid)?;
         let host = &rest[..end];
-        let port_str = rest[end + 1..]
+        let port = rest[end + 1..]
             .strip_prefix(':')
-            .ok_or_else(|| anyhow!("Invalid address: {}", addr))?;
-        let port = port_str
-            .parse::<u16>()
-            .map_err(|_| anyhow!("Invalid port in address: {}", addr))?;
+            .and_then(|p| p.parse::<u16>().ok())
+            .ok_or_else(invalid)?;
         return Ok((host.to_string(), port));
     }
 
-    let (host, port_str) = addr
-        .rsplit_once(':')
-        .ok_or_else(|| anyhow!("Invalid address: {}", addr))?;
-    let port = port_str
-        .parse::<u16>()
-        .map_err(|_| anyhow!("Invalid port in address: {}", addr))?;
+    let (host, port_str) = addr.rsplit_once(':').ok_or_else(invalid)?;
+    let port = port_str.parse::<u16>().map_err(|_| invalid())?;
     Ok((host.to_string(), port))
 }
+
+type ConnectFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<ConnectResult, String>> + Send>>;
 
 pub struct ConnectResult {
     pub bearer: Bearer,
     pub addr: SocketAddr,
 }
 
-async fn connect_list(addrs: Vec<SocketAddr>) -> Result<ConnectResult> {
-    let mut last_err: Option<anyhow::Error> = None;
+async fn connect_list(addrs: Vec<SocketAddr>) -> Result<ConnectResult, String> {
+    let mut last_err: Option<String> = None;
     for addr in addrs {
         match Bearer::connect_tcp(addr).await {
             Ok(b) => return Ok(ConnectResult { bearer: b, addr }),
-            Err(e) => last_err = Some(e.into()),
+            Err(e) => last_err = Some(format!("{}: {}", addr, e)),
         }
     }
-    Err(last_err.unwrap_or_else(|| anyhow!("No addresses to connect to")))
+    Err(last_err.unwrap_or_else(|| "No addresses to connect to".to_string()))
 }
 
-async fn connect_happy_eyeballs_inner(addr: &str) -> Result<ConnectResult> {
+async fn connect_happy_eyeballs_inner(addr: &str) -> Result<ConnectResult, ConnectError> {
     let (prefer_v6, delay_ms) = happy_eyeballs_config();
     let (host, port) = split_host_port(addr)?;
     let addrs: Vec<SocketAddr> = lookup_host((host.as_str(), port))
         .await
-        .map_err(|e| anyhow!("DNS lookup failed for {}: {}", addr, e))?
+        .map_err(|e| ConnectError::Dns(format!("DNS lookup failed for {}: {}", addr, e)))?
         .collect();
 
     if addrs.is_empty() {
-        return Err(anyhow!("DNS lookup returned no addresses for {}", addr));
+        return Err(ConnectError::Dns(format!("DNS lookup returned no addresses for {}", addr)));
     }
 
     let mut v6_addrs = Vec::new();
@@ -92,11 +106,13 @@ async fn connect_happy_eyeballs_inner(addr: &str) -> Result<ConnectResult> {
         }
     }
 
+    let connect_err = |e: String| ConnectError::Connect(format!("Connect error to {}", e));
+
     if v6_addrs.is_empty() {
-        return connect_list(v4_addrs).await.map_err(|e| anyhow!("Connect error to {}: {}", addr, e));
+        return connect_list(v4_addrs).await.map_err(connect_err);
     }
     if v4_addrs.is_empty() {
-        return connect_list(v6_addrs).await.map_err(|e| anyhow!("Connect error to {}: {}", addr, e));
+        return connect_list(v6_addrs).await.map_err(connect_err);
     }
 
     let mut v6_err: Option<String> = None;
@@ -111,7 +127,7 @@ async fn connect_happy_eyeballs_inner(addr: &str) -> Result<ConnectResult> {
     };
 
     let mut primary_fut = Box::pin(connect_list(primary_addrs));
-    let mut secondary_fut: Option<std::pin::Pin<Box<dyn std::future::Future<Output = Result<ConnectResult>> + Send>>> = None;
+    let mut secondary_fut: Option<ConnectFuture> = None;
 
     if delay_ms == 0 {
         secondary_fut = Some(Box::pin(connect_list(secondary_addrs.clone())));
@@ -129,9 +145,9 @@ async fn connect_happy_eyeballs_inner(addr: &str) -> Result<ConnectResult> {
                 Ok(b) => return Ok(b),
                 Err(e) => {
                     if primary_is_v6 {
-                        v6_err = Some(e.to_string());
+                        v6_err = Some(e);
                     } else {
-                        v4_err = Some(e.to_string());
+                        v4_err = Some(e);
                     }
                 }
             }
@@ -158,9 +174,9 @@ async fn connect_happy_eyeballs_inner(addr: &str) -> Result<ConnectResult> {
                     Ok(b) => return Ok(b),
                     Err(e) => {
                         if primary_is_v6 {
-                            v6_err = Some(e.to_string());
+                            v6_err = Some(e);
                         } else {
-                            v4_err = Some(e.to_string());
+                            v4_err = Some(e);
                         }
                     }
                 }
@@ -175,9 +191,9 @@ async fn connect_happy_eyeballs_inner(addr: &str) -> Result<ConnectResult> {
                     Ok(b) => return Ok(b),
                     Err(e) => {
                         if primary_is_v6 {
-                            v4_err = Some(e.to_string());
+                            v4_err = Some(e);
                         } else {
-                            v6_err = Some(e.to_string());
+                            v6_err = Some(e);
                         }
                     }
                 }
@@ -185,12 +201,12 @@ async fn connect_happy_eyeballs_inner(addr: &str) -> Result<ConnectResult> {
         }
 
         if v6_done && v4_done {
-            return Err(anyhow!(
+            return Err(ConnectError::Connect(format!(
                 "Connect error to {} (v6): {}; (v4): {}",
                 addr,
                 v6_err.unwrap_or_else(|| "unknown".to_string()),
                 v4_err.unwrap_or_else(|| "unknown".to_string()),
-            ));
+            )));
         }
     }
 }
@@ -200,9 +216,9 @@ async fn connect_happy_eyeballs_inner(addr: &str) -> Result<ConnectResult> {
 pub async fn connect_happy_eyeballs_with_addr(
     addr: &str,
     timeout_duration: Duration,
-) -> Result<ConnectResult> {
+) -> Result<ConnectResult, ConnectError> {
     match timeout(timeout_duration, connect_happy_eyeballs_inner(addr)).await {
         Ok(res) => res,
-        Err(_) => Err(anyhow!("Connect timeout")),
+        Err(_) => Err(ConnectError::Timeout),
     }
 }

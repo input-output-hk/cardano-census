@@ -11,7 +11,7 @@ The snapshot is the `peerSnapshotV3` file cardano-node 11.x reads for its big le
 
 ## What counts as reachable
 
-A relay is reachable when it completes the node-to-node handshake and answers one ChainSync `FindIntersect` with its tip, within the timeout. That is the same test cardano-scope applies on its first scan cycle, so the stake figures line up with its `Reporting` value. Nothing is fetched beyond the tip, and the tip is taken as the relay reports it.
+A relay is reachable when it completes the node-to-node handshake and answers one ChainSync `FindIntersect` with its tip, within the timeout. Nothing is fetched beyond the tip, and the tip is taken as the relay reports it.
 
 The timeout applies twice: once to DNS plus connect, then again to handshake plus chainsync. A relay that connects slowly and then stalls can take close to twice the setting before it is counted as failed.
 
