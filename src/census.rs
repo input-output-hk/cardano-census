@@ -101,6 +101,13 @@ pub struct ReachGroup {
     pub stake_ratio: f64,
 }
 
+/// How many of one SRV name's top-priority targets answered.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct SrvSet {
+    pub targets: u64,
+    pub reachable: u64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Census {
     pub snapshot_source: String,
@@ -114,6 +121,11 @@ pub struct Census {
 
     pub relays_total: u64,
     pub relays_srv: u64,
+    /// Per SRV name, its target count and how many answered.
+    pub srv_sets: BTreeMap<String, SrvSet>,
+    /// Distinct endpoints that are SRV targets, and how many answered.
+    pub srv_endpoints_total: u64,
+    pub srv_endpoints_reachable: u64,
     pub endpoints_total: u64,
     pub endpoints_probed: u64,
     pub relays_reachable_v4: u64,
@@ -274,6 +286,33 @@ pub fn build(
     let reachable_stake_ratio =
         blp_by_reach["partial"].stake_ratio + blp_by_reach["full"].stake_ratio;
 
+    // SRV set health, invisible to the pool weighting above since an entry
+    // counts as reachable when any one target answers.
+    let mut srv_sets: BTreeMap<String, SrvSet> = BTreeMap::new();
+    let mut srv_endpoints_total = 0;
+    let mut srv_endpoints_reachable = 0;
+    for (i, ep) in endpoints.iter().enumerate() {
+        let reached = matches!(outcomes[i], Some(Ok(_)));
+        let mut is_srv_target = false;
+        for &e in &ep.entries {
+            if entries[e].is_srv() {
+                is_srv_target = true;
+                let set = srv_sets.entry(entries[e].address.clone()).or_default();
+                set.targets += 1;
+                set.reachable += reached as u64;
+            }
+        }
+        if is_srv_target {
+            srv_endpoints_total += 1;
+            srv_endpoints_reachable += reached as u64;
+        }
+    }
+    // Two pools listing the same SRV name share its endpoints and were counted
+    // once per name above; names whose lookup failed still get a row.
+    for e in entries.iter().filter(|e| e.is_srv()) {
+        srv_sets.entry(e.address.clone()).or_default();
+    }
+
     let mut rtt_seconds = Histogram::new(&RTT_BOUNDS);
     let mut tip_block_max = 0;
     let mut tip_slot_max = 0;
@@ -295,6 +334,9 @@ pub fn build(
 
         relays_total: entries.len() as u64,
         relays_srv: entries.iter().filter(|e| e.is_srv()).count() as u64,
+        srv_sets,
+        srv_endpoints_total,
+        srv_endpoints_reachable,
         endpoints_total: endpoints.len() as u64,
         endpoints_probed: endpoints.iter().filter(|e| e.dns_error.is_none()).count() as u64,
         relays_reachable_v4,

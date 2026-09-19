@@ -35,6 +35,9 @@ struct RelayReport {
     /// Every endpoint this entry was probed at. One for a plain relay, one per
     /// top-priority SRV target otherwise.
     endpoints: Vec<String>,
+    /// Each SRV target's own result; empty for a plain relay.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    targets: Vec<TargetReport>,
     /// The endpoint whose result the fields below describe.
     #[serde(skip_serializing_if = "Option::is_none")]
     endpoint: Option<String>,
@@ -54,6 +57,40 @@ struct RelayReport {
     stage: Option<Stage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TargetReport {
+    endpoint: String,
+    reachable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rtt_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stage: Option<Stage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn target_report(endpoint: &Endpoint, outcome: Option<&Outcome>) -> TargetReport {
+    let mut t = TargetReport {
+        endpoint: endpoint.key.clone(),
+        reachable: false,
+        rtt_ms: None,
+        stage: None,
+        error: None,
+    };
+    match outcome {
+        Some(Ok(ok)) => {
+            t.reachable = true;
+            t.rtt_ms = Some(ok.rtt_ms);
+        }
+        Some(Err(f)) => {
+            t.stage = Some(f.stage);
+            t.error = Some(f.error.clone());
+        }
+        None => {}
+    }
+    t
 }
 
 pub fn render(
@@ -102,6 +139,13 @@ pub fn render(
             port: e.port,
             srv: e.is_srv(),
             endpoints: eps.iter().map(|&x| endpoints[x].key.clone()).collect(),
+            targets: if e.is_srv() {
+                eps.iter()
+                    .map(|&x| target_report(&endpoints[x], outcomes[x].as_ref()))
+                    .collect()
+            } else {
+                Vec::new()
+            },
             endpoint: chosen.map(|x| endpoints[x].key.clone()),
             shared_endpoint: chosen.map(|x| endpoints[x].entries.len() > 1).unwrap_or(false),
             reachable: false,

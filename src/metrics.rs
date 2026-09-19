@@ -95,6 +95,28 @@ pub fn render(c: &Census) -> String {
         "Relay entries that are SRV record names, each probed at its top-priority targets",
         &c.relays_srv.to_string(),
     );
+    if !c.srv_sets.is_empty() {
+        family(&mut out, "srv_targets", "gauge", "Top-priority targets behind each SRV relay name");
+        for (name, set) in &c.srv_sets {
+            sample(&mut out, "srv_targets", &[("name", name)], &set.targets.to_string());
+        }
+        family(&mut out, "srv_targets_reachable", "gauge", "Targets behind each SRV relay name that returned a tip");
+        for (name, set) in &c.srv_sets {
+            sample(&mut out, "srv_targets_reachable", &[("name", name)], &set.reachable.to_string());
+        }
+    }
+    gauge(
+        &mut out,
+        "srv_endpoints_total",
+        "Distinct endpoints that are SRV targets",
+        &c.srv_endpoints_total.to_string(),
+    );
+    gauge(
+        &mut out,
+        "srv_endpoints_reachable",
+        "Distinct SRV target endpoints that returned a tip",
+        &c.srv_endpoints_reachable.to_string(),
+    );
     gauge(
         &mut out,
         "endpoints_total",
