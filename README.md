@@ -54,6 +54,10 @@ All gauges, since each run is a fresh observation. Ratios are 0 to 1.
 | `cardano_census_blp_relay_reachability` | Histogram of pools by the share of their relays that answered. Buckets `0`, `0.25`, `0.5`, `0.75`, `1` |
 | `cardano_census_probe_rtt_seconds` | Histogram of connect through tip response per answering endpoint. Buckets `0.05` to `60` |
 | `cardano_census_tip_block_max`, `cardano_census_tip_slot_max` | Highest block and slot any relay reported |
+| `cardano_census_tips_at_max_block` | Distinct hashes reported at the highest block. More than one is a fork or slot battle at the tip |
+| `cardano_census_chains`, `cardano_census_fork_tolerance_blocks` | Tip groups after merging tips within the tolerance, and the tolerance used |
+| `cardano_census_chain_relays{chain="main"\|"other"}`, `cardano_census_chain_stake_ratio{chain=...}` | Answering relays and stake on the main group and on all others |
+| `cardano_census_relays_within_blocks_of_tip{le}`, `cardano_census_stake_within_blocks_of_tip{le}` | Relays, and stake by each pool's most current relay, at most `le` blocks behind the highest tip. `le` in `0 1 2 5 10 50 100 1000 +Inf` |
 | `cardano_census_scan_duration_seconds` | Wall time from first DNS lookup to last probe |
 | `cardano_census_last_run_timestamp_seconds` | When the run finished |
 | `cardano_census_success` | 1 when the run completed, 0 when it could not |
@@ -61,6 +65,12 @@ All gauges, since each run is a fresh observation. Ratios are 0 to 1.
 The gap between `reachable_stake_ratio` and `relay_weighted_stake_ratio` is how much of the reachable stake is hanging on partial relay sets. Equal values mean every pool is either fully up or fully down. The spread of `stake_reachable_within` across its buckets shows how much stake is reachable only slowly.
 
 When the run fails before probing, for example an unreadable snapshot, the metrics file is replaced with just `success 0` and the timestamp, and the process exits non-zero.
+
+## Chains
+
+Every answering relay reports its tip, so the run also says how the network agrees on it. Tips are grouped by hash, groups whose blocks lie within `--fork-tolerance` of each other are merged, default 10, and the group holding the most stake is `main`. A pool's stake is split evenly over its answering relays, so `chain_stake_ratio` sums to `reachable_stake_ratio`.
+
+One probe carries no chain history, so a group far behind main cannot be told apart from a fork by this alone. It is usually relays that are stuck or syncing. Read it together with `tips_at_max_block`, which counts competing hashes at the very tip, and the `*_within_blocks_of_tip` buckets, which show how far behind the tail is. Relays are probed over the whole run, so a lag of a few blocks is the run's own duration, not a relay falling behind. The report gives every relay's `lag_blocks` and whether it sits on `main_chain`, and the summary lists each group with its block range and highest hash.
 
 ## Report
 

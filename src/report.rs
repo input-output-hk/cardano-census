@@ -53,6 +53,11 @@ struct RelayReport {
     tip: Option<Tip>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rtt_ms: Option<u64>,
+    /// Blocks behind the highest tip seen, and whether on the main chain group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lag_blocks: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    main_chain: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stage: Option<Stage>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -154,6 +159,8 @@ pub fn render(
             n2n_version: None,
             tip: None,
             rtt_ms: None,
+            lag_blocks: census.entry_tips[i].map(|t| t.lag_blocks),
+            main_chain: census.entry_tips[i].map(|t| t.main),
             stage: None,
             error: None,
         };

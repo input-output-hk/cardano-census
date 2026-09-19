@@ -185,6 +185,40 @@ pub fn render(c: &Census) -> String {
 
     gauge(&mut out, "tip_block_max", "Highest block number reported by any relay", &c.tip_block_max.to_string());
     gauge(&mut out, "tip_slot_max", "Highest slot reported by any relay", &c.tip_slot_max.to_string());
+    gauge(
+        &mut out,
+        "tips_at_max_block",
+        "Distinct block hashes reported at the highest block; more than one is a fork or slot battle at the tip",
+        &c.tips_at_max_block.to_string(),
+    );
+    gauge(
+        &mut out,
+        "chains",
+        "Tip groups after merging tips within fork_tolerance blocks of each other",
+        &c.chains.len().to_string(),
+    );
+    gauge(&mut out, "fork_tolerance_blocks", "Block distance within which tips count as one chain", &c.fork_tolerance.to_string());
+    let (main, other): (Vec<_>, Vec<_>) = c.chains.iter().partition(|g| g.main);
+    let sum_relays = |gs: &[&crate::census::ChainGroup]| gs.iter().map(|g| g.relays).sum::<u64>();
+    let sum_stake = |gs: &[&crate::census::ChainGroup]| gs.iter().map(|g| g.stake_ratio).sum::<f64>();
+    family(&mut out, "chain_relays", "gauge", "Answering relay entries on the main chain group and on all others");
+    sample(&mut out, "chain_relays", &[("chain", "main")], &sum_relays(&main).to_string());
+    sample(&mut out, "chain_relays", &[("chain", "other")], &sum_relays(&other).to_string());
+    family(&mut out, "chain_stake_ratio", "gauge", "Stake on the main chain group and on all others, each pool split over its answering relays");
+    sample(&mut out, "chain_stake_ratio", &[("chain", "main")], &num(sum_stake(&main)));
+    sample(&mut out, "chain_stake_ratio", &[("chain", "other")], &num(sum_stake(&other)));
+    within(
+        &mut out,
+        "relays_within_blocks_of_tip",
+        "Answering relay entries whose tip is at most le blocks behind the highest",
+        &c.relays_within_blocks_of_tip,
+    );
+    within(
+        &mut out,
+        "stake_within_blocks_of_tip",
+        "Stake of pools whose most current relay is at most le blocks behind the highest tip",
+        &c.stake_within_blocks_of_tip,
+    );
 
     gauge(
         &mut out,
@@ -217,6 +251,7 @@ pub fn render_failure(timestamp_seconds: u64) -> String {
 }
 
 /// Shortest representation after rounding away float noise beyond 9 decimals.
+/// Adding 0.0 turns the negative zero an empty sum produces into a plain 0.
 fn num(x: f64) -> String {
-    ((x * 1e9).round() / 1e9).to_string()
+    ((x * 1e9).round() / 1e9 + 0.0).to_string()
 }

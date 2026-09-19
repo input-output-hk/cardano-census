@@ -122,6 +122,7 @@ async fn run(args: &Args) -> Result<()> {
         &endpoints,
         &outcomes,
         &srv_errors,
+        args.fork_tolerance,
         started.elapsed(),
         unix_now(),
     );

@@ -108,6 +108,26 @@ pub struct SrvSet {
     pub reachable: u64,
 }
 
+/// Tips grouped by hash, with groups whose blocks lie within the fork
+/// tolerance of each other merged. The group holding the most stake is main.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChainGroup {
+    pub main: bool,
+    pub block_max: u64,
+    pub block_min: u64,
+    /// Hash of the highest tip in the group.
+    pub hash: String,
+    pub relays: u64,
+    pub stake_ratio: f64,
+}
+
+/// Where one relay entry's tip sits relative to the highest tip seen.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct EntryTip {
+    pub lag_blocks: u64,
+    pub main: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Census {
     pub snapshot_source: String,
@@ -142,18 +162,27 @@ pub struct Census {
 
     pub tip_block_max: u64,
     pub tip_slot_max: u64,
+    /// Distinct hashes reported at the highest block.
+    pub tips_at_max_block: u64,
+    pub fork_tolerance: u64,
+    pub chains: Vec<ChainGroup>,
+    pub relays_within_blocks_of_tip: Cumulative,
+    pub stake_within_blocks_of_tip: Cumulative,
 
     pub scan_duration_seconds: f64,
     pub timestamp_seconds: u64,
 
     #[serde(skip)]
     pub pools: Vec<PoolStat>,
+    #[serde(skip)]
+    pub entry_tips: Vec<Option<EntryTip>>,
 }
 
 pub const REACHABILITY_BOUNDS: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
 pub const RTT_BOUNDS: [f64; 13] =
     [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0];
 pub const WITHIN_BOUNDS: [f64; 9] = [1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0];
+pub const LAG_BOUNDS: [f64; 8] = [0.0, 1.0, 2.0, 5.0, 10.0, 50.0, 100.0, 1000.0];
 
 /// Does `candidate` say more about an entry than `current`? A tip beats any
 /// failure, and a faster tip beats a slower one.
@@ -204,6 +233,7 @@ pub fn build(
     endpoints: &[Endpoint],
     outcomes: &[Option<Outcome>],
     srv_errors: &[Option<String>],
+    fork_tolerance: u64,
     scan: Duration,
     timestamp_seconds: u64,
 ) -> Census {
@@ -322,6 +352,41 @@ pub fn build(
         tip_slot_max = tip_slot_max.max(r.tip.slot);
     }
 
+    let (chains, entry_tips) = chain_groups(
+        entries,
+        &entry_outcome,
+        &per_pool_ok,
+        |pool| snap.pools[pool].relative_stake,
+        tip_block_max,
+        fork_tolerance,
+    );
+    let tips_at_max_block = {
+        let mut hashes: Vec<&str> = entry_outcome
+            .iter()
+            .filter_map(|o| o.as_ref().and_then(|o| o.as_ref().ok()))
+            .filter(|r| r.tip.block == tip_block_max)
+            .map(|r| r.tip.hash.as_str())
+            .collect();
+        hashes.sort_unstable();
+        hashes.dedup();
+        hashes.len() as u64
+    };
+    let mut relays_within_blocks_of_tip = Cumulative::new(&LAG_BOUNDS);
+    let mut stake_within_blocks_of_tip = Cumulative::new(&LAG_BOUNDS);
+    let mut per_pool_least_lag: Vec<Option<u64>> = vec![None; snap.pools.len()];
+    for (i, t) in entry_tips.iter().enumerate() {
+        if let Some(t) = t {
+            relays_within_blocks_of_tip.observe(t.lag_blocks as f64, 1.0);
+            let least = per_pool_least_lag[entries[i].pool].get_or_insert(t.lag_blocks);
+            *least = (*least).min(t.lag_blocks);
+        }
+    }
+    for (pool, lag) in per_pool_least_lag.iter().enumerate() {
+        if let Some(lag) = lag {
+            stake_within_blocks_of_tip.observe(*lag as f64, snap.pools[pool].relative_stake);
+        }
+    }
+
     Census {
         snapshot_source: snapshot_source.to_string(),
         network_magic: snap.network_magic,
@@ -353,10 +418,114 @@ pub fn build(
 
         tip_block_max,
         tip_slot_max,
+        tips_at_max_block,
+        fork_tolerance,
+        chains,
+        relays_within_blocks_of_tip,
+        stake_within_blocks_of_tip,
 
         scan_duration_seconds: scan.as_secs_f64(),
         timestamp_seconds,
 
         pools,
+        entry_tips,
     }
+}
+
+/// Group reachable entries by tip hash, merge groups whose blocks lie within
+/// `tolerance` of each other, and call the group with the most stake main.
+/// A pool's stake is split evenly over its answering entries, as scope does,
+/// so the groups' stake sums to the reachable stake.
+fn chain_groups(
+    entries: &[Entry],
+    entry_outcome: &[Option<Outcome>],
+    per_pool_ok: &[usize],
+    pool_stake: impl Fn(usize) -> f64,
+    tip_block_max: u64,
+    tolerance: u64,
+) -> (Vec<ChainGroup>, Vec<Option<EntryTip>>) {
+    // Distinct hashes, each with its block and the entries reporting it.
+    let mut by_hash: BTreeMap<&str, (u64, Vec<usize>)> = BTreeMap::new();
+    for (i, o) in entry_outcome.iter().enumerate() {
+        if let Some(Ok(r)) = o {
+            let slot = by_hash.entry(r.tip.hash.as_str()).or_insert((r.tip.block, Vec::new()));
+            slot.0 = slot.0.max(r.tip.block);
+            slot.1.push(i);
+        }
+    }
+    let hashes: Vec<(&str, u64, Vec<usize>)> =
+        by_hash.into_iter().map(|(h, (b, es))| (h, b, es)).collect();
+
+    // Union-find over hashes by block distance.
+    let mut parent: Vec<usize> = (0..hashes.len()).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for a in 0..hashes.len() {
+        for b in (a + 1)..hashes.len() {
+            if hashes[a].1.abs_diff(hashes[b].1) <= tolerance {
+                let (ra, rb) = (root(&mut parent, a), root(&mut parent, b));
+                if ra != rb {
+                    parent[rb] = ra;
+                }
+            }
+        }
+    }
+
+    let mut groups: BTreeMap<usize, ChainGroup> = BTreeMap::new();
+    let mut entry_group: Vec<Option<usize>> = vec![None; entries.len()];
+    for (h, (hash, block, es)) in hashes.iter().enumerate() {
+        let r = root(&mut parent, h);
+        let g = groups.entry(r).or_insert(ChainGroup {
+            main: false,
+            block_max: *block,
+            block_min: *block,
+            hash: hash.to_string(),
+            relays: 0,
+            stake_ratio: 0.0,
+        });
+        if *block > g.block_max {
+            g.block_max = *block;
+            g.hash = hash.to_string();
+        }
+        g.block_min = g.block_min.min(*block);
+        for &e in es {
+            let pool = entries[e].pool;
+            g.relays += 1;
+            g.stake_ratio += pool_stake(pool) / per_pool_ok[pool].max(1) as f64;
+            entry_group[e] = Some(r);
+        }
+    }
+
+    let main_root = groups
+        .iter()
+        .max_by(|a, b| a.1.stake_ratio.partial_cmp(&b.1.stake_ratio).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(r, _)| *r);
+    if let Some(r) = main_root {
+        groups.get_mut(&r).unwrap().main = true;
+    }
+
+    let entry_tips = entry_outcome
+        .iter()
+        .enumerate()
+        .map(|(i, o)| match (o, entry_group[i]) {
+            (Some(Ok(r)), Some(g)) => Some(EntryTip {
+                lag_blocks: tip_block_max.saturating_sub(r.tip.block),
+                main: Some(g) == main_root,
+            }),
+            _ => None,
+        })
+        .collect();
+
+    let mut chains: Vec<ChainGroup> = groups.into_values().collect();
+    chains.sort_by(|a, b| {
+        b.main
+            .cmp(&a.main)
+            .then(b.stake_ratio.partial_cmp(&a.stake_ratio).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    (chains, entry_tips)
 }

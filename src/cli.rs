@@ -39,6 +39,10 @@ pub struct Args {
     #[arg(long, default_value_t = 128)]
     pub parallel: usize,
 
+    /// Tips this many blocks apart or closer count as the same chain
+    #[arg(long, default_value_t = 10)]
+    pub fork_tolerance: u64,
+
     /// Try IPv4 first instead of IPv6
     #[arg(long)]
     pub prefer_ipv4: bool,
