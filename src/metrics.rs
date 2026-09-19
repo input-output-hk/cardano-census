@@ -104,6 +104,15 @@ pub fn render(c: &Census) -> String {
         for (name, set) in &c.srv_sets {
             sample(&mut out, "srv_targets_reachable", &[("name", name)], &set.reachable.to_string());
         }
+        family(
+            &mut out,
+            "srv_reach_probability",
+            "gauge",
+            "Chance a node drawing a target of this SRV name by weight reaches one that answered",
+        );
+        for (name, set) in &c.srv_sets {
+            sample(&mut out, "srv_reach_probability", &[("name", name)], &num(set.reach_probability));
+        }
     }
     gauge(
         &mut out,
@@ -155,7 +164,7 @@ pub fn render(c: &Census) -> String {
     gauge(
         &mut out,
         "relay_weighted_stake_ratio",
-        "Stake weighted by the share of each pool's relays that answered",
+        "Stake weighted by the share of each pool's relays that answered, an SRV relay by the weight of its answering targets",
         &num(c.relay_weighted_stake_ratio),
     );
     within(

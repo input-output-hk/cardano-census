@@ -93,6 +93,9 @@ pub struct PoolStat {
     pub relays_reachable: usize,
     pub reach: Reach,
     pub fraction: f64,
+    /// Like `fraction`, but an SRV entry counts by the weight of its answering
+    /// targets: the chance a node choosing that record reaches a working one.
+    pub weighted_fraction: f64,
     pub fastest_rtt_ms: Option<u64>,
 }
 
@@ -107,6 +110,8 @@ pub struct ReachGroup {
 pub struct SrvSet {
     pub targets: u64,
     pub reachable: u64,
+    /// Weight of the answering targets over the weight of all of them.
+    pub reach_probability: f64,
 }
 
 /// Tips grouped by hash, with groups whose blocks lie within the fork
@@ -201,6 +206,10 @@ pub struct Census {
     pub asn_metrics: Vec<AsnGroup>,
     #[serde(skip)]
     pub entry_asn: Vec<Option<AsInfo>>,
+    /// Per entry, the chance a node using it reaches a working relay: 0 or 1
+    /// for a plain relay, weight-based for an SRV record.
+    #[serde(skip)]
+    pub entry_probability: Vec<f64>,
 }
 
 pub const REACHABILITY_BOUNDS: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
@@ -265,6 +274,7 @@ pub fn build(
     timestamp_seconds: u64,
 ) -> Census {
     let entry_outcome = best_outcomes(entries, endpoints, outcomes, srv_errors);
+    let entry_probability = reach_probabilities(entries, endpoints, outcomes, &entry_outcome);
 
     let mut relays_failed: BTreeMap<&'static str, u64> =
         Stage::ALL.iter().map(|s| (s.label(), 0)).collect();
@@ -282,10 +292,12 @@ pub fn build(
 
     let mut per_pool_total = vec![0usize; snap.pools.len()];
     let mut per_pool_ok = vec![0usize; snap.pools.len()];
+    let mut per_pool_probability = vec![0f64; snap.pools.len()];
     let mut per_pool_fastest: Vec<Option<u64>> = vec![None; snap.pools.len()];
     let mut relays_reachable_within = Cumulative::new(&WITHIN_BOUNDS);
     for (i, e) in entries.iter().enumerate() {
         per_pool_total[e.pool] += 1;
+        per_pool_probability[e.pool] += entry_probability[i];
         if let Some(Ok(r)) = &entry_outcome[i] {
             per_pool_ok[e.pool] += 1;
             relays_reachable_within.observe(r.rtt_ms as f64 / 1000.0, 1.0);
@@ -293,6 +305,7 @@ pub fn build(
             *fastest = (*fastest).min(r.rtt_ms);
         }
     }
+
 
     let mut blp_by_reach: BTreeMap<&'static str, ReachGroup> =
         Reach::ALL.iter().map(|r| (r.label(), ReachGroup::default())).collect();
@@ -310,6 +323,11 @@ pub fn build(
         } else {
             relays_reachable as f64 / relays_total as f64
         };
+        let weighted_fraction = if relays_total == 0 {
+            0.0
+        } else {
+            per_pool_probability[index] / relays_total as f64
+        };
         let reach = if relays_reachable == 0 {
             Reach::None
         } else if relays_reachable == relays_total {
@@ -321,7 +339,7 @@ pub fn build(
         let group = blp_by_reach.get_mut(reach.label()).unwrap();
         group.pools += 1;
         group.stake_ratio += p.relative_stake;
-        relay_weighted_stake_ratio += p.relative_stake * fraction;
+        relay_weighted_stake_ratio += p.relative_stake * weighted_fraction;
         snapshot_stake_ratio += p.relative_stake;
         reachability.observe(fraction);
         let fastest_rtt_ms = per_pool_fastest[index];
@@ -336,6 +354,7 @@ pub fn build(
             relays_reachable,
             reach,
             fraction,
+            weighted_fraction,
             fastest_rtt_ms,
         });
     }
@@ -366,8 +385,8 @@ pub fn build(
     }
     // Two pools listing the same SRV name share its endpoints and were counted
     // once per name above; names whose lookup failed still get a row.
-    for e in entries.iter().filter(|e| e.is_srv()) {
-        srv_sets.entry(e.address.clone()).or_default();
+    for (i, e) in entries.iter().enumerate().filter(|(_, e)| e.is_srv()) {
+        srv_sets.entry(e.address.clone()).or_default().reach_probability = entry_probability[i];
     }
 
     let (entry_asn, asn_table, asn_metrics) = asn_groups(
@@ -472,7 +491,52 @@ pub fn build(
         entry_tips,
         asn_metrics,
         entry_asn,
+        entry_probability,
     }
+}
+
+/// The chance a node using each entry reaches a working relay. A plain relay
+/// is 1 or 0. An SRV record is the weight of its answering targets over the
+/// weight of all its targets, as a node draws one target by weight; when
+/// every weight is 0 the draw is uniform, so the count ratio is used.
+fn reach_probabilities(
+    entries: &[Entry],
+    endpoints: &[Endpoint],
+    outcomes: &[Option<Outcome>],
+    entry_outcome: &[Option<Outcome>],
+) -> Vec<f64> {
+    let mut weight_total = vec![0u64; entries.len()];
+    let mut weight_reached = vec![0u64; entries.len()];
+    let mut targets = vec![0u64; entries.len()];
+    let mut targets_reached = vec![0u64; entries.len()];
+    for (i, ep) in endpoints.iter().enumerate() {
+        let reached = matches!(outcomes[i], Some(Ok(_)));
+        for (&e, w) in ep.entries.iter().zip(&ep.weights) {
+            let w = u64::from(w.unwrap_or(0));
+            weight_total[e] += w;
+            targets[e] += 1;
+            if reached {
+                weight_reached[e] += w;
+                targets_reached[e] += 1;
+            }
+        }
+    }
+    entries
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            if !e.is_srv() {
+                return if matches!(entry_outcome[i], Some(Ok(_))) { 1.0 } else { 0.0 };
+            }
+            if weight_total[i] > 0 {
+                weight_reached[i] as f64 / weight_total[i] as f64
+            } else if targets[i] > 0 {
+                targets_reached[i] as f64 / targets[i] as f64
+            } else {
+                0.0
+            }
+        })
+        .collect()
 }
 
 /// Place every entry in an AS by the address that answered, or the first
@@ -652,4 +716,55 @@ fn chain_groups(
             .then(b.stake_ratio.partial_cmp(&a.stake_ratio).unwrap_or(std::cmp::Ordering::Equal))
     });
     (chains, entry_tips)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::probe::{Family, Reached, Tip};
+
+    fn reached() -> Outcome {
+        Ok(Reached {
+            peer: "192.0.2.1:3001".parse().unwrap(),
+            family: Family::V4,
+            n2n_version: "14".into(),
+            tip: Tip { slot: 1, hash: "aa".into(), block: 1 },
+            rtt_ms: 10,
+        })
+    }
+
+    fn failed() -> Outcome {
+        Err(Failed { stage: Stage::Connect, error: "timeout".into() })
+    }
+
+    fn endpoint(key: &str, entries: &[(usize, Option<u16>)]) -> Endpoint {
+        Endpoint {
+            key: key.into(),
+            entries: entries.iter().map(|e| e.0).collect(),
+            weights: entries.iter().map(|e| e.1).collect(),
+            addrs: Vec::new(),
+            dns_error: None,
+        }
+    }
+
+    #[test]
+    fn srv_probability_follows_weights_then_counts() {
+        let entries = vec![
+            Entry { pool: 0, address: "srv.example".into(), port: None },
+            Entry { pool: 0, address: "zero.example".into(), port: None },
+            Entry { pool: 0, address: "plain.example".into(), port: Some(3001) },
+        ];
+        let endpoints = vec![
+            endpoint("a:6000", &[(0, Some(30)), (1, Some(0))]),
+            endpoint("b:6000", &[(0, Some(10)), (1, Some(0))]),
+            endpoint("c:6000", &[(1, Some(0))]),
+            endpoint("plain.example:3001", &[(2, None)]),
+        ];
+        let outcomes = vec![Some(reached()), Some(failed()), Some(failed()), Some(failed())];
+        let best = best_outcomes(&entries, &endpoints, &outcomes, &[None, None, None]);
+        let p = reach_probabilities(&entries, &endpoints, &outcomes, &best);
+        assert!((p[0] - 0.75).abs() < 1e-12, "30 of 40 weight answered");
+        assert!((p[1] - 1.0 / 3.0).abs() < 1e-12, "all weights zero falls back to 1 of 3 targets");
+        assert_eq!(p[2], 0.0, "a plain relay that failed");
+    }
 }

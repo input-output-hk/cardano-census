@@ -31,6 +31,8 @@ impl Entry {
 pub struct Endpoint {
     pub key: String,
     pub entries: Vec<usize>,
+    /// Per entry, the SRV weight that led it here; None for a plain relay.
+    pub weights: Vec<Option<u16>>,
     /// Every address the key resolved to, kept so unreachable endpoints can
     /// still be placed in a network.
     pub addrs: Vec<IpAddr>,
@@ -59,14 +61,16 @@ pub fn entries(snapshot: &Snapshot) -> Vec<Entry> {
         .collect()
 }
 
-/// Top-priority SRV targets as host and port, or why there were none.
-type SrvTargets = Result<Vec<(String, u16)>, String>;
+/// Top-priority SRV targets as host, port and weight, or why there were none.
+type SrvTargets = Result<Vec<(String, u16, u16)>, String>;
 
 /// A host and port to probe on behalf of an entry.
 struct Target {
     entry: usize,
     host: String,
     port: u16,
+    /// SRV weight; None for a plain relay.
+    weight: Option<u16>,
 }
 
 struct Looked {
@@ -87,6 +91,7 @@ pub async fn resolve(entries: &[Entry], parallel: usize) -> Resolved {
                 entry: idx,
                 host: e.address.clone(),
                 port,
+                weight: None,
             });
         }
     }
@@ -107,8 +112,8 @@ pub async fn resolve(entries: &[Entry], parallel: usize) -> Resolved {
                 for (idx, result) in looked {
                     match result {
                         Ok(found) => {
-                            for (host, port) in found {
-                                targets.push(Target { entry: idx, host, port });
+                            for (host, port, weight) in found {
+                                targets.push(Target { entry: idx, host, port, weight: Some(weight) });
                             }
                         }
                         Err(e) => srv_errors[idx] = Some(e),
@@ -135,7 +140,7 @@ async fn srv_targets(resolver: &TokioResolver, name: &str) -> SrvTargets {
         .srv_lookup(format!("{}.", name.trim_end_matches('.')).as_str())
         .await
         .map_err(|e| format!("SRV lookup failed for {name}: {e}"))?;
-    let records: Vec<(u16, String, u16)> = lookup
+    let records: Vec<(u16, String, u16, u16)> = lookup
         .answers()
         .iter()
         .filter_map(|r| match &r.data {
@@ -143,19 +148,20 @@ async fn srv_targets(resolver: &TokioResolver, name: &str) -> SrvTargets {
                 srv.priority,
                 srv.target.to_utf8().trim_end_matches('.').to_string(),
                 srv.port,
+                srv.weight,
             )),
             _ => None,
         })
         .collect();
     let best = records
         .iter()
-        .map(|(p, _, _)| *p)
+        .map(|(p, _, _, _)| *p)
         .min()
         .ok_or_else(|| format!("no SRV records for {name}"))?;
     Ok(records
         .into_iter()
-        .filter(|(p, _, _)| *p == best)
-        .map(|(_, host, port)| (host, port))
+        .filter(|(p, _, _, _)| *p == best)
+        .map(|(_, host, port, weight)| (host, port, weight))
         .collect())
 }
 
@@ -202,9 +208,18 @@ async fn group(targets: &[Target], parallel: usize) -> Vec<Endpoint> {
     let mut groups: HashMap<String, Endpoint> = HashMap::new();
     let mut ip_to_key: HashMap<String, String> = HashMap::new();
 
-    let push_entry = |ep: &mut Endpoint, entry: usize| {
-        if !ep.entries.contains(&entry) {
-            ep.entries.push(entry);
+    // Two SRV records of one name landing on the same endpoint add their weights.
+    let push_entry = |ep: &mut Endpoint, entry: usize, weight: Option<u16>| {
+        match ep.entries.iter().position(|&e| e == entry) {
+            Some(i) => {
+                if let (Some(w), Some(have)) = (weight, ep.weights[i]) {
+                    ep.weights[i] = Some(have.saturating_add(w));
+                }
+            }
+            None => {
+                ep.entries.push(entry);
+                ep.weights.push(weight);
+            }
         }
     };
 
@@ -216,10 +231,11 @@ async fn group(targets: &[Target], parallel: usize) -> Vec<Endpoint> {
         let ep = groups.entry(key.clone()).or_insert_with(|| Endpoint {
             key,
             entries: Vec::new(),
+            weights: Vec::new(),
             addrs: ip.into_iter().collect(),
             dns_error: None,
         });
-        push_entry(ep, targets[l.target].entry);
+        push_entry(ep, targets[l.target].entry, targets[l.target].weight);
     }
 
     // Hostnames join the group of any address they resolve to, else start their own.
@@ -234,10 +250,11 @@ async fn group(targets: &[Target], parallel: usize) -> Vec<Endpoint> {
         let ep = groups.entry(key.clone()).or_insert_with(|| Endpoint {
             key: key.clone(),
             entries: Vec::new(),
+            weights: Vec::new(),
             addrs: Vec::new(),
             dns_error: l.dns_error.clone(),
         });
-        push_entry(ep, target.entry);
+        push_entry(ep, target.entry, target.weight);
         // One good lookup for this name is enough to probe it.
         if l.dns_error.is_none() {
             ep.dns_error = None;

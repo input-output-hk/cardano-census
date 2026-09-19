@@ -38,6 +38,9 @@ struct RelayReport {
     /// Each SRV target's own result; empty for a plain relay.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     targets: Vec<TargetReport>,
+    /// For an SRV record, the weight of answering targets over all of them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reach_probability: Option<f64>,
     /// The endpoint whose result the fields below describe.
     #[serde(skip_serializing_if = "Option::is_none")]
     endpoint: Option<String>,
@@ -71,6 +74,8 @@ struct RelayReport {
 #[derive(Serialize)]
 struct TargetReport {
     endpoint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    weight: Option<u16>,
     reachable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     rtt_ms: Option<u64>,
@@ -80,9 +85,14 @@ struct TargetReport {
     error: Option<String>,
 }
 
-fn target_report(endpoint: &Endpoint, outcome: Option<&Outcome>) -> TargetReport {
+fn target_report(endpoint: &Endpoint, entry: usize, outcome: Option<&Outcome>) -> TargetReport {
     let mut t = TargetReport {
         endpoint: endpoint.key.clone(),
+        weight: endpoint
+            .entries
+            .iter()
+            .position(|&e| e == entry)
+            .and_then(|i| endpoint.weights[i]),
         reachable: false,
         rtt_ms: None,
         stage: None,
@@ -150,11 +160,12 @@ pub fn render(
             endpoints: eps.iter().map(|&x| endpoints[x].key.clone()).collect(),
             targets: if e.is_srv() {
                 eps.iter()
-                    .map(|&x| target_report(&endpoints[x], outcomes[x].as_ref()))
+                    .map(|&x| target_report(&endpoints[x], i, outcomes[x].as_ref()))
                     .collect()
             } else {
                 Vec::new()
             },
+            reach_probability: e.is_srv().then_some(census.entry_probability[i]),
             endpoint: chosen.map(|x| endpoints[x].key.clone()),
             shared_endpoint: chosen.map(|x| endpoints[x].entries.len() > 1).unwrap_or(false),
             reachable: false,
