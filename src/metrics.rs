@@ -2,6 +2,8 @@ use crate::census::{Census, Cumulative, Histogram, Reach};
 use crate::probe::Stage;
 
 const PREFIX: &str = "cardano_census_";
+/// Tip groups exported with a rank label; the rest stay in the report.
+const CHAIN_GROUP_RANKS: usize = 10;
 
 fn escape(v: &str) -> String {
     v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
@@ -273,6 +275,33 @@ pub fn render(c: &Census, labels: &[(String, String)]) -> String {
     out.family("chain_stake_ratio", "gauge", "Stake on the main chain group and on all others, each pool split over its answering relays");
     out.sample("chain_stake_ratio", &[("chain", "main")], &num(sum_stake(&main)));
     out.sample("chain_stake_ratio", &[("chain", "other")], &num(sum_stake(&other)));
+    // The largest groups by stake as fixed rank labels, so a fork draws as a
+    // second line under the tip without a hash label churning series.
+    let ranked: Vec<(String, &crate::census::ChainGroup)> = c
+        .chains
+        .iter()
+        .take(CHAIN_GROUP_RANKS)
+        .enumerate()
+        .map(|(i, g)| ((i + 1).to_string(), g))
+        .collect();
+    if !ranked.is_empty() {
+        out.family("chain_group_block", "gauge", "Highest block in each tip group, rank 1 the main group then by stake");
+        for (rank, g) in &ranked {
+            out.sample("chain_group_block", &[("rank", rank)], &g.block_max.to_string());
+        }
+        out.family("chain_group_lag_blocks", "gauge", "Blocks each tip group's highest block sits behind the highest tip seen");
+        for (rank, g) in &ranked {
+            out.sample("chain_group_lag_blocks", &[("rank", rank)], &c.tip_block_max.saturating_sub(g.block_max).to_string());
+        }
+        out.family("chain_group_relays", "gauge", "Answering relay entries in each tip group");
+        for (rank, g) in &ranked {
+            out.sample("chain_group_relays", &[("rank", rank)], &g.relays.to_string());
+        }
+        out.family("chain_group_stake_ratio", "gauge", "Stake in each tip group, each pool split over its answering relays");
+        for (rank, g) in &ranked {
+            out.sample("chain_group_stake_ratio", &[("rank", rank)], &num(g.stake_ratio));
+        }
+    }
     out.within(
         "relays_within_blocks_of_tip",
         "Answering relay entries whose tip is at most le blocks behind the highest",
