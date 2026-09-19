@@ -22,6 +22,8 @@ The timeout is one budget per relay covering DNS, connect, handshake and the tip
 
 Relay entries that resolve to the same socket address are probed once and all take that result. Metrics that say `relays` count snapshot entries. Metrics that say `endpoints` count distinct addresses probed.
 
+A relay entry without a port is an SRV record name, which is how the ledger registers a relay by service record. It is looked up as SRV, every target at the lowest priority value is probed, and the entry counts as reachable if any of them answers. A node picks one of those targets by weight, so this is the union of what a node might reach. An entry whose SRV lookup fails or returns nothing fails at the `srv` stage.
+
 Stake is the snapshot's `relativeStake`, a share of total ledger stake taken from the pool distribution the node uses for the current epoch. It is fixed at the epoch boundary and does not follow live delegation. The snapshot stops adding pools once their stake reaches 90%, so `cardano_census_snapshot_stake_ratio` reads about 0.9 on every well formed snapshot.
 
 ## Metrics
@@ -35,10 +37,11 @@ All gauges, since each run is a fresh observation. Ratios are 0 to 1.
 | `cardano_census_blp_total` | Big ledger pools in the snapshot |
 | `cardano_census_snapshot_stake_ratio` | Sum of `relativeStake` over the snapshot's pools |
 | `cardano_census_relays_total` | Relay entries in the snapshot |
-| `cardano_census_endpoints_total` | Distinct socket addresses after resolving and deduplicating |
+| `cardano_census_relays_srv` | Relay entries that are SRV record names |
+| `cardano_census_endpoints_total` | Distinct socket addresses after resolving and deduplicating, SRV targets included |
 | `cardano_census_endpoints_probed` | Endpoints that resolved and were probed |
 | `cardano_census_relays_reachable{family="v4"\|"v6"}` | Relay entries that returned a tip, by the address family that answered |
-| `cardano_census_relays_failed{stage="dns"\|"connect"\|"handshake"\|"chainsync"}` | Relay entries that returned no tip, by the stage that failed |
+| `cardano_census_relays_failed{stage="srv"\|"dns"\|"connect"\|"handshake"\|"chainsync"}` | Relay entries that returned no tip, by the stage that failed |
 | `cardano_census_blp{reach="none"\|"partial"\|"full"}` | Pools with none, some, or all of their relays answering |
 | `cardano_census_blp_stake_ratio{reach=...}` | Summed `relativeStake` of the pools in each reach class |
 | `cardano_census_reachable_stake_ratio` | Stake of pools with at least one relay answering. `partial` plus `full` |
@@ -58,7 +61,7 @@ When the run fails before probing, for example an unreadable snapshot, the metri
 
 ## Report
 
-`--report` writes JSON with the same summary plus one record per relay entry: the endpoint it was probed as, which address family answered, the negotiated N2N version, the tip, the round trip, or the stage and error it failed at.
+`--report` writes JSON with the same summary plus one record per relay entry: the endpoints it was probed at, which address family answered, the negotiated N2N version, the tip, the round trip, or the stage and error it failed at. An SRV entry lists every target endpoint and reports its best one.
 
 ## NixOS
 

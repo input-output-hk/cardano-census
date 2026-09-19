@@ -55,7 +55,7 @@ async fn run(args: &Args) -> Result<()> {
         (None, None) => anyhow::bail!("one of --snapshot or --node-socket is required"),
     };
     let magic = args.network_magic.unwrap_or(snap.network_magic);
-    let entries = resolve::entries(&snap, args.port);
+    let entries = resolve::entries(&snap);
     eprintln!(
         "snapshot from {source}: {} pools, {} relay entries, magic {}, N2C v{}, slot {}",
         snap.pools.len(),
@@ -66,13 +66,17 @@ async fn run(args: &Args) -> Result<()> {
     );
 
     let started = Instant::now();
-    let endpoints = resolve::resolve(&entries, args.parallel).await;
+    let resolve::Resolved { endpoints, srv_errors } = resolve::resolve(&entries, args.parallel).await;
     let unresolved = endpoints.iter().filter(|e| e.dns_error.is_some()).count();
+    let srv_total = entries.iter().filter(|e| e.is_srv()).count();
+    let srv_failed = srv_errors.iter().flatten().count();
     eprintln!(
-        "resolved to {} endpoints in {:.1}s, {} names did not resolve",
+        "resolved to {} endpoints in {:.1}s, {} names did not resolve, {} of {} SRV lookups failed",
         endpoints.len(),
         started.elapsed().as_secs_f64(),
         unresolved,
+        srv_failed,
+        srv_total,
     );
 
     let timeout = Duration::from_secs(args.timeout);
@@ -117,13 +121,17 @@ async fn run(args: &Args) -> Result<()> {
         &entries,
         &endpoints,
         &outcomes,
+        &srv_errors,
         started.elapsed(),
         unix_now(),
     );
 
     output::write(&args.output, &metrics::render(&census))?;
     if let Some(path) = &args.report {
-        output::write(path, &report::render(&census, &snap, &entries, &endpoints, &outcomes)?)?;
+        output::write(
+            path,
+            &report::render(&census, &snap, &entries, &endpoints, &outcomes, &srv_errors)?,
+        )?;
     }
 
     let reachable = census.relays_reachable_v4 + census.relays_reachable_v6;

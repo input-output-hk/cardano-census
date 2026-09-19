@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::probe::{Family, Outcome, Stage};
+use crate::probe::{Failed, Family, Outcome, Stage};
 use crate::resolve::{Endpoint, Entry};
 use crate::snapshot::Snapshot;
 
@@ -113,6 +113,7 @@ pub struct Census {
     pub snapshot_stake_ratio: f64,
 
     pub relays_total: u64,
+    pub relays_srv: u64,
     pub endpoints_total: u64,
     pub endpoints_probed: u64,
     pub relays_reachable_v4: u64,
@@ -142,23 +143,59 @@ pub const RTT_BOUNDS: [f64; 13] =
     [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0];
 pub const WITHIN_BOUNDS: [f64; 9] = [1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0];
 
+/// Does `candidate` say more about an entry than `current`? A tip beats any
+/// failure, and a faster tip beats a slower one.
+fn better(current: Option<&Outcome>, candidate: &Outcome) -> bool {
+    match (current, candidate) {
+        (None, _) => true,
+        (Some(Err(_)), Ok(_)) => true,
+        (Some(Ok(a)), Ok(b)) => b.rtt_ms < a.rtt_ms,
+        _ => false,
+    }
+}
+
+/// One outcome per relay entry. An entry probed at several endpoints, as an
+/// SRV record is, takes its best one; an SRV entry with no targets fails at
+/// the `srv` stage.
+pub fn best_outcomes(
+    entries: &[Entry],
+    endpoints: &[Endpoint],
+    outcomes: &[Option<Outcome>],
+    srv_errors: &[Option<String>],
+) -> Vec<Option<Outcome>> {
+    let mut best: Vec<Option<Outcome>> = vec![None; entries.len()];
+    for (i, ep) in endpoints.iter().enumerate() {
+        if let Some(o) = &outcomes[i] {
+            for &e in &ep.entries {
+                if better(best[e].as_ref(), o) {
+                    best[e] = Some(o.clone());
+                }
+            }
+        }
+    }
+    for (e, err) in srv_errors.iter().enumerate() {
+        if let (Some(err), None) = (err, &best[e]) {
+            best[e] = Some(Err(Failed {
+                stage: Stage::Srv,
+                error: err.clone(),
+            }));
+        }
+    }
+    best
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     snapshot_source: &str,
     snap: &Snapshot,
     entries: &[Entry],
     endpoints: &[Endpoint],
     outcomes: &[Option<Outcome>],
+    srv_errors: &[Option<String>],
     scan: Duration,
     timestamp_seconds: u64,
 ) -> Census {
-    let mut entry_outcome: Vec<Option<&Outcome>> = vec![None; entries.len()];
-    for (i, ep) in endpoints.iter().enumerate() {
-        if let Some(o) = &outcomes[i] {
-            for &e in &ep.entries {
-                entry_outcome[e] = Some(o);
-            }
-        }
-    }
+    let entry_outcome = best_outcomes(entries, endpoints, outcomes, srv_errors);
 
     let mut relays_failed: BTreeMap<&'static str, u64> =
         Stage::ALL.iter().map(|s| (s.label(), 0)).collect();
@@ -180,7 +217,7 @@ pub fn build(
     let mut relays_reachable_within = Cumulative::new(&WITHIN_BOUNDS);
     for (i, e) in entries.iter().enumerate() {
         per_pool_total[e.pool] += 1;
-        if let Some(Ok(r)) = entry_outcome[i] {
+        if let Some(Ok(r)) = &entry_outcome[i] {
             per_pool_ok[e.pool] += 1;
             relays_reachable_within.observe(r.rtt_ms as f64 / 1000.0, 1.0);
             let fastest = per_pool_fastest[e.pool].get_or_insert(r.rtt_ms);
@@ -257,6 +294,7 @@ pub fn build(
         snapshot_stake_ratio,
 
         relays_total: entries.len() as u64,
+        relays_srv: entries.iter().filter(|e| e.is_srv()).count() as u64,
         endpoints_total: endpoints.len() as u64,
         endpoints_probed: endpoints.iter().filter(|e| e.dns_error.is_none()).count() as u64,
         relays_reachable_v4,

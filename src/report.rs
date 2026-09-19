@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::census::{Census, Reach};
+use crate::census::{best_outcomes, Census, Reach};
 use crate::probe::{Family, Outcome, Stage, Tip};
 use crate::resolve::{Endpoint, Entry};
 use crate::snapshot::Snapshot;
@@ -29,8 +29,15 @@ struct PoolReport {
 #[derive(Serialize)]
 struct RelayReport {
     address: String,
-    port: u16,
-    endpoint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port: Option<u16>,
+    srv: bool,
+    /// Every endpoint this entry was probed at. One for a plain relay, one per
+    /// top-priority SRV target otherwise.
+    endpoints: Vec<String>,
+    /// The endpoint whose result the fields below describe.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
     shared_endpoint: bool,
     reachable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,13 +62,15 @@ pub fn render(
     entries: &[Entry],
     endpoints: &[Endpoint],
     outcomes: &[Option<Outcome>],
+    srv_errors: &[Option<String>],
 ) -> Result<String> {
-    let mut entry_endpoint = vec![usize::MAX; entries.len()];
+    let mut entry_endpoints: Vec<Vec<usize>> = vec![Vec::new(); entries.len()];
     for (i, ep) in endpoints.iter().enumerate() {
         for &e in &ep.entries {
-            entry_endpoint[e] = i;
+            entry_endpoints[e].push(i);
         }
     }
+    let best = best_outcomes(entries, endpoints, outcomes, srv_errors);
 
     let mut pools: Vec<PoolReport> = census
         .pools
@@ -80,13 +89,21 @@ pub fn render(
         .collect();
 
     for (i, e) in entries.iter().enumerate() {
-        let ep = &endpoints[entry_endpoint[i]];
-        let outcome = outcomes[entry_endpoint[i]].as_ref();
+        let eps = &entry_endpoints[i];
+        // The endpoint that produced the entry's best outcome, if any did.
+        let chosen = match &best[i] {
+            Some(Ok(b)) => eps.iter().copied().find(|&x| {
+                matches!(&outcomes[x], Some(Ok(o)) if o.peer == b.peer && o.rtt_ms == b.rtt_ms)
+            }),
+            Some(Err(_)) | None => eps.first().copied(),
+        };
         let mut r = RelayReport {
             address: e.address.clone(),
             port: e.port,
-            endpoint: ep.key.clone(),
-            shared_endpoint: ep.entries.len() > 1,
+            srv: e.is_srv(),
+            endpoints: eps.iter().map(|&x| endpoints[x].key.clone()).collect(),
+            endpoint: chosen.map(|x| endpoints[x].key.clone()),
+            shared_endpoint: chosen.map(|x| endpoints[x].entries.len() > 1).unwrap_or(false),
             reachable: false,
             peer: None,
             family: None,
@@ -96,7 +113,7 @@ pub fn render(
             stage: None,
             error: None,
         };
-        match outcome {
+        match &best[i] {
             Some(Ok(ok)) => {
                 r.reachable = true;
                 r.peer = Some(ok.peer.to_string());

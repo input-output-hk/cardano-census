@@ -80,6 +80,12 @@ pub fn render(c: &Census) -> String {
     gauge(&mut out, "relays_total", "Relay entries in the snapshot", &c.relays_total.to_string());
     gauge(
         &mut out,
+        "relays_srv",
+        "Relay entries that are SRV record names, each probed at its top-priority targets",
+        &c.relays_srv.to_string(),
+    );
+    gauge(
+        &mut out,
         "endpoints_total",
         "Distinct socket addresses after resolving and deduplicating the relay entries",
         &c.endpoints_total.to_string(),

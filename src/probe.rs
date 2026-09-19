@@ -18,6 +18,7 @@ use crate::net::{connect_happy_eyeballs_with_addr, ConnectError};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Stage {
+    Srv,
     Dns,
     Connect,
     Handshake,
@@ -25,10 +26,11 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const ALL: [Stage; 4] = [Stage::Dns, Stage::Connect, Stage::Handshake, Stage::Chainsync];
+    pub const ALL: [Stage; 5] = [Stage::Srv, Stage::Dns, Stage::Connect, Stage::Handshake, Stage::Chainsync];
 
     pub fn label(self) -> &'static str {
         match self {
+            Stage::Srv => "srv",
             Stage::Dns => "dns",
             Stage::Connect => "connect",
             Stage::Handshake => "handshake",

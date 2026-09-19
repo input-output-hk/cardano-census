@@ -27,10 +27,6 @@ pub struct Args {
     #[arg(long, value_name = "FILE")]
     pub report: Option<PathBuf>,
 
-    /// Port for relays that list none
-    #[arg(long, default_value_t = 3001)]
-    pub port: u16,
-
     /// Seconds allowed per relay for DNS, connect, handshake and tip together
     #[arg(long, default_value_t = 60)]
     pub timeout: u64,

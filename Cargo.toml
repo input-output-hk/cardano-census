@@ -10,6 +10,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 hex = "0.4"
+hickory-resolver = "0.26"
 pallas-codec = "1.4"
 pallas-network = "1.4"
 rand = "0.10"
