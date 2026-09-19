@@ -28,7 +28,7 @@ Stake is the snapshot's `relativeStake`, a share of total ledger stake taken fro
 
 ## Metrics
 
-All gauges, since each run is a fresh observation. Ratios are 0 to 1.
+All gauges, since each run is a fresh observation. Ratios are 0 to 1. `--label KEY=VALUE`, repeatable, stamps a label on every series, for an `environment` or `group` the scraper would not add itself; a series that already carries the same label name keeps its own.
 
 | Metric | Meaning |
 | --- | --- |
@@ -106,7 +106,7 @@ The `asn` series carry the AS number and its registry handle, the first word of 
 
 Set `snapshotFile` instead of `nodeSocket` to read a file. With a socket the service joins `nodeSocketGroup`, `cardano-node` by default, to reach it.
 
-The module runs the census every 15 minutes as a oneshot service under a dynamic user and writes to `/var/lib/cardano-census`. `interval`, `timeout`, `parallel`, `forkTolerance`, `reportFile`, `textfileDirectory` and `extraArgs` are options.
+The module runs the census every 15 minutes as a oneshot service under a dynamic user and writes to `/var/lib/cardano-census`. `interval`, `timeout`, `parallel`, `forkTolerance`, `labels`, `reportFile`, `textfileDirectory` and `extraArgs` are options.
 
 It also keeps the AS database current: before each run it fetches `asnDatabase.url` when the local copy is older than `asnDatabase.maxAgeHours`, default a day, and a failed fetch keeps the previous copy. `asnDatabase.minRelays` sets the fold threshold and `asnDatabase.enable = false` turns the whole thing off.
 

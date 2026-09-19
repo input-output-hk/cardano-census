@@ -27,6 +27,10 @@ pub struct Args {
     #[arg(long, value_name = "FILE", default_value = "-")]
     pub output: PathBuf,
 
+    /// Label stamped on every series, as KEY=VALUE; repeatable
+    #[arg(long = "label", value_name = "KEY=VALUE", value_parser = parse_label)]
+    pub labels: Vec<(String, String)>,
+
     /// Per-relay JSON report
     #[arg(long, value_name = "FILE")]
     pub report: Option<PathBuf>,
@@ -64,4 +68,21 @@ impl Args {
     pub fn output_is_stdout(&self) -> bool {
         self.output.as_os_str() == "-"
     }
+}
+
+/// `KEY=VALUE` with a Prometheus label name as the key.
+fn parse_label(s: &str) -> Result<(String, String), String> {
+    let (key, value) = s
+        .split_once('=')
+        .ok_or_else(|| format!("expected KEY=VALUE, got {s:?}"))?;
+    let valid = !key.is_empty()
+        && !key.starts_with("__")
+        && key
+            .chars()
+            .enumerate()
+            .all(|(i, c)| c == '_' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit()));
+    if !valid {
+        return Err(format!("{key:?} is not a valid label name"));
+    }
+    Ok((key.to_string(), value.to_string()))
 }

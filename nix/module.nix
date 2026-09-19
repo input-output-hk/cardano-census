@@ -127,6 +127,16 @@ in {
       };
     };
 
+    labels = mkOption {
+      type = types.attrsOf types.str;
+      default = {};
+      example = {
+        environment = "preview";
+        group = "preview1";
+      };
+      description = "Labels stamped on every series the census writes.";
+    };
+
     extraArgs = mkOption {
       type = types.listOf types.str;
       default = [];
@@ -173,6 +183,7 @@ in {
           ++ optionals fromNode ["--node-socket" cfg.nodeSocket]
           ++ optionals (cfg.networkMagic != null) ["--network-magic" (toString cfg.networkMagic)]
           ++ optionals (cfg.reportFile != null) ["--report" cfg.reportFile]
+          ++ lib.concatLists (lib.mapAttrsToList (k: v: ["--label" "${k}=${v}"]) cfg.labels)
           ++ optionals cfg.asnDatabase.enable [
             "--asn-db"
             asnFile

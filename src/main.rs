@@ -32,7 +32,7 @@ async fn main() {
     if let Err(e) = run(&args).await {
         eprintln!("cardano-census: {e:#}");
         if !args.output_is_stdout() {
-            if let Err(w) = output::write(&args.output, &metrics::render_failure(unix_now())) {
+            if let Err(w) = output::write(&args.output, &metrics::render_failure(unix_now(), &args.labels)) {
                 eprintln!("cardano-census: writing failure metrics: {w:#}");
             }
         }
@@ -141,7 +141,7 @@ async fn run(args: &Args) -> Result<()> {
         unix_now(),
     );
 
-    output::write(&args.output, &metrics::render(&census))?;
+    output::write(&args.output, &metrics::render(&census, &args.labels))?;
     if let Some(path) = &args.report {
         output::write(
             path,
