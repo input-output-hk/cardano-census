@@ -297,6 +297,7 @@ pub fn render(c: &Census, labels: &[(String, String)]) -> String {
                     ("pools", &p.pools.to_string()),
                     ("relays_total", &p.relays_total.to_string()),
                     ("relays_reachable", &p.relays_reachable.to_string()),
+                    ("relays_reversed", &p.relays_reversed.to_string()),
                     ("relays", &relays),
                 ],
                 &num(p.stake_ratio),

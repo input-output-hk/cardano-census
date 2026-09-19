@@ -103,6 +103,8 @@ pub struct PoolStat {
     /// From the pool index, when one was given and a relay matched.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<PoolMeta>,
+    /// Relays the index matched only through their octet reversal.
+    pub relays_reversed: usize,
     /// The pool's relay entries as written in the snapshot.
     #[serde(skip)]
     pub relays: Vec<String>,
@@ -169,6 +171,8 @@ pub struct OutreachRow {
     pub pools: u64,
     pub relays_total: u64,
     pub relays_reachable: u64,
+    /// Relays named only through their octet reversal, see reversed.rs.
+    pub relays_reversed: u64,
     pub stake_ratio: f64,
     pub relays: Vec<String>,
 }
@@ -408,8 +412,10 @@ pub fn build(
         }
 
         let own_entries: Vec<&Entry> = entries.iter().filter(|e| e.pool == index).collect();
-        let meta = pool_index
+        let identity = pool_index
             .and_then(|idx| idx.identify(own_entries.iter().map(|e| (e.address.as_str(), e.port))));
+        let relays_reversed = identity.as_ref().map(|i| i.reversed).unwrap_or(0);
+        let meta = identity.map(|i| i.meta);
         let relays = own_entries
             .iter()
             .map(|e| match e.port {
@@ -428,6 +434,7 @@ pub fn build(
             weighted_fraction,
             fastest_rtt_ms,
             meta,
+            relays_reversed,
             relays,
         });
     }
@@ -630,12 +637,14 @@ fn outreach(pools: &[PoolStat], limit: usize) -> Vec<OutreachRow> {
             pools: 0,
             relays_total: 0,
             relays_reachable: 0,
+            relays_reversed: 0,
             stake_ratio: 0.0,
             relays: Vec::new(),
         });
         row.pools += 1;
         row.relays_total += p.relays_total as u64;
         row.relays_reachable += p.relays_reachable as u64;
+        row.relays_reversed += p.relays_reversed as u64;
         row.stake_ratio += p.relative_stake;
         if p.reach == Reach::Partial {
             row.reach = Reach::Partial;

@@ -104,18 +104,40 @@ impl PoolIndex {
 
     /// The pool most of these relays are registered to; ties go to the
     /// lexically smallest pool id so the answer is stable between runs.
-    pub fn identify<'a>(&self, relays: impl IntoIterator<Item = (&'a str, Option<u16>)>) -> Option<PoolMeta> {
-        let mut votes: std::collections::BTreeMap<&str, (usize, &PoolMeta)> = std::collections::BTreeMap::new();
+    /// An IPv4 literal that matches nothing is retried with its octets
+    /// reversed, the spelling node 11.1.x gives, and counted in `reversed`.
+    pub fn identify<'a>(&self, relays: impl IntoIterator<Item = (&'a str, Option<u16>)>) -> Option<Identity> {
+        // Per pool id: votes, votes that came through a reversed spelling, meta.
+        let mut votes: std::collections::BTreeMap<&str, (usize, usize, &PoolMeta)> = std::collections::BTreeMap::new();
         for (address, port) in relays {
-            for meta in self.by_relay.get(&relay_key(address, port)).into_iter().flatten() {
-                votes.entry(meta.pool_id.as_str()).or_insert((0, meta)).0 += 1;
+            let direct = self.by_relay.get(&relay_key(address, port));
+            let (matched, reversed) = match direct {
+                Some(pools) => (Some(pools), false),
+                None => (reversed_key(address, port).and_then(|k| self.by_relay.get(&k)), true),
+            };
+            for meta in matched.into_iter().flatten() {
+                let v = votes.entry(meta.pool_id.as_str()).or_insert((0, 0, meta));
+                v.0 += 1;
+                v.1 += reversed as usize;
             }
         }
         votes
             .into_iter()
             .max_by(|a, b| a.1 .0.cmp(&b.1 .0).then(b.0.cmp(a.0)))
-            .map(|(_, (_, meta))| meta.clone())
+            .map(|(_, (_, reversed, meta))| Identity { meta: meta.clone(), reversed })
     }
+}
+
+/// A named pool and how many of its relays matched only octet-reversed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identity {
+    pub meta: PoolMeta,
+    pub reversed: usize,
+}
+
+fn reversed_key(address: &str, port: Option<u16>) -> Option<String> {
+    let ip: std::net::Ipv4Addr = address.trim().parse().ok()?;
+    Some(relay_key(&crate::reversed::reverse(ip).to_string(), port))
 }
 
 #[cfg(test)]
@@ -148,11 +170,28 @@ mod tests {
             &["Relay.Example.org:3001", "[2001:db8::1]:3001", "srv.example.org"],
         )]);
         assert_eq!(idx.pools, 1);
-        let one = |a: &str, p: Option<u16>| idx.identify([(a, p)]);
+        let one = |a: &str, p: Option<u16>| idx.identify([(a, p)]).map(|i| i.meta);
         assert_eq!(one("relay.example.org.", Some(3001)).unwrap().ticker.as_deref(), Some("TST"));
         assert_eq!(one("2001:DB8:0::1", Some(3001)).unwrap().pool_id, "pool1abc");
         assert!(one("srv.example.org", None).is_some());
         assert!(one("relay.example.org", Some(3002)).is_none());
+    }
+
+    #[test]
+    fn ipv4_literal_falls_back_to_its_octet_reversal() {
+        let idx = PoolIndex::from_records(vec![record(
+            "pool1rev",
+            Some("REV"),
+            &["20.61.229.103:3001", "relay.example.org:3001", "10.0.0.1:3001"],
+        )]);
+        let both = idx.identify([("103.229.61.20", Some(3001)), ("relay.example.org", Some(3001))]).unwrap();
+        assert_eq!(both.meta.pool_id, "pool1rev");
+        assert_eq!(both.reversed, 1, "one relay matched only reversed");
+        let direct = idx.identify([("20.61.229.103", Some(3001))]).unwrap();
+        assert_eq!(direct.reversed, 0, "a direct match is never counted as reversed");
+        // 10.0.0.1 reversed is 1.0.0.10, which the index does not know.
+        assert!(idx.identify([("10.0.0.1", Some(3002))]).is_none());
+        assert_eq!(idx.identify([("1.0.0.10", Some(3001))]).unwrap().reversed, 1);
     }
 
     #[test]
@@ -163,15 +202,15 @@ mod tests {
         ]);
         // Two relays vote zzz, one votes both: zzz wins on count.
         let zzz = idx.identify([("shared.example.org", Some(3001)), ("zzz.example.org", Some(3001))]);
-        assert_eq!(zzz.unwrap().pool_id, "pool1zzz");
+        assert_eq!(zzz.unwrap().meta.pool_id, "pool1zzz");
         // Only the shared relay: a tie, broken towards the smaller id.
         let tie = idx.identify([("shared.example.org", Some(3001))]);
-        assert_eq!(tie.unwrap().pool_id, "pool1aaa");
+        assert_eq!(tie.unwrap().meta.pool_id, "pool1aaa");
     }
 
     #[test]
     fn empty_ticker_reads_as_unknown() {
         let idx = PoolIndex::from_records(vec![record("pool1xyz", Some(""), &["r.example.org:3001"])]);
-        assert_eq!(idx.identify([("r.example.org", Some(3001))]).unwrap().ticker, None);
+        assert_eq!(idx.identify([("r.example.org", Some(3001))]).unwrap().meta.ticker, None);
     }
 }
