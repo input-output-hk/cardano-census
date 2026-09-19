@@ -28,6 +28,10 @@ struct PoolReport {
     relays_reachable: usize,
     /// Relays the pool index matched only through their octet reversal.
     relays_reversed: usize,
+    /// Why relays failed, distinct and most common first.
+    reasons: Vec<&'static str>,
+    /// Distinct socket addresses the relays resolved to.
+    endpoints: Vec<String>,
     reach: Reach,
     fraction: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -157,6 +161,8 @@ pub fn render(
             relays_total: p.relays_total,
             relays_reachable: p.relays_reachable,
             relays_reversed: p.relays_reversed,
+            reasons: p.reasons.clone(),
+            endpoints: p.endpoints.clone(),
             reach: p.reach,
             fraction: p.fraction,
             fastest_rtt_ms: p.fastest_rtt_ms,

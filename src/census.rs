@@ -105,6 +105,10 @@ pub struct PoolStat {
     pub meta: Option<PoolMeta>,
     /// Relays the index matched only through their octet reversal.
     pub relays_reversed: usize,
+    /// Why relays failed, distinct, most common first; empty when all answered.
+    pub reasons: Vec<&'static str>,
+    /// Distinct socket addresses the pool's relays resolved to.
+    pub endpoints: Vec<String>,
     /// The pool's relay entries as written in the snapshot.
     #[serde(skip)]
     pub relays: Vec<String>,
@@ -173,6 +177,10 @@ pub struct OutreachRow {
     pub relays_reachable: u64,
     /// Relays named only through their octet reversal, see reversed.rs.
     pub relays_reversed: u64,
+    /// Distinct socket addresses behind all the operator's relays.
+    pub endpoints: u64,
+    /// Why relays failed, distinct and most common first, comma separated.
+    pub reasons: String,
     pub stake_ratio: f64,
     pub relays: Vec<String>,
 }
@@ -260,6 +268,10 @@ pub struct Census {
     /// for the outreach series; at most `top_pools_limit` of them.
     #[serde(skip)]
     pub top_pools: Vec<OutreachRow>,
+    /// Operators running the most pools per distinct relay endpoint, at most
+    /// `top_pools_limit` of them, reachable or not.
+    #[serde(skip)]
+    pub thin_operators: Vec<OutreachRow>,
     #[serde(skip)]
     pub entry_tips: Vec<Option<EntryTip>>,
     /// The AS table with small ASes folded into `other`, for the metrics.
@@ -396,6 +408,13 @@ pub fn build(
     let ipv4 = ipv4_reversal(entries, &entry_outcome, shadow, &per_pool_ok, |pool| {
         snap.pools[pool].relative_stake
     });
+    let mut entry_endpoints: Vec<Vec<usize>> = vec![Vec::new(); entries.len()];
+    for (x, ep) in endpoints.iter().enumerate() {
+        for &e in &ep.entries {
+            entry_endpoints[e].push(x);
+        }
+    }
+    let entry_reason = entry_reasons(entries, endpoints, &entry_endpoints, &entry_outcome, shadow, asn_db);
 
     let mut blp_by_reach: BTreeMap<&'static str, ReachGroup> =
         Reach::ALL.iter().map(|r| (r.label(), ReachGroup::default())).collect();
@@ -437,18 +456,27 @@ pub fn build(
             stake_reachable_within.observe(ms as f64 / 1000.0, p.relative_stake);
         }
 
-        let own_entries: Vec<&Entry> = entries.iter().filter(|e| e.pool == index).collect();
+        let own: Vec<usize> = (0..entries.len()).filter(|&i| entries[i].pool == index).collect();
         let identity = pool_index
-            .and_then(|idx| idx.identify(own_entries.iter().map(|e| (e.address.as_str(), e.port))));
+            .and_then(|idx| idx.identify(own.iter().map(|&i| (entries[i].address.as_str(), entries[i].port))));
         let relays_reversed = identity.as_ref().map(|i| i.reversed).unwrap_or(0);
         let meta = identity.map(|i| i.meta);
-        let relays = own_entries
+        let relays = own
             .iter()
-            .map(|e| match e.port {
-                Some(port) => format_host_port(&e.address, port),
-                None => e.address.clone(),
+            .map(|&i| match entries[i].port {
+                Some(port) => format_host_port(&entries[i].address, port),
+                None => entries[i].address.clone(),
             })
             .collect();
+        let mut pool_endpoints: Vec<String> = Vec::new();
+        for &i in &own {
+            for &x in &entry_endpoints[i] {
+                if !pool_endpoints.contains(&endpoints[x].key) {
+                    pool_endpoints.push(endpoints[x].key.clone());
+                }
+            }
+        }
+        let reasons = rank_reasons(own.iter().filter_map(|&i| entry_reason[i]).map(|r| (r, 1)));
 
         pools.push(PoolStat {
             index,
@@ -461,12 +489,16 @@ pub fn build(
             fastest_rtt_ms,
             meta,
             relays_reversed,
+            reasons,
+            endpoints: pool_endpoints,
             relays,
         });
     }
 
     let pools_indexed = pools.iter().filter(|p| p.meta.is_some()).count() as u64;
-    let top_pools = outreach(&pools, top_pools_limit);
+    let operators = operators(&pools);
+    let top_pools = outreach(&operators, top_pools_limit);
+    let thin_operators = thin(&operators, top_pools_limit);
 
     let reachable_stake_ratio =
         blp_by_reach["partial"].stake_ratio + blp_by_reach["full"].stake_ratio;
@@ -613,6 +645,7 @@ pub fn build(
 
         pools,
         top_pools,
+        thin_operators,
         entry_tips,
         asn_metrics,
         entry_asn,
@@ -645,12 +678,65 @@ fn ipv4_reversal(
     r
 }
 
-/// Merge not-fully-reachable pools by identity, rank by stake, keep `limit`.
-/// Pools whose registration carries no ticker or name are merged by the
-/// domain their relays share, which is the only handle there is on them.
-fn outreach(pools: &[PoolStat], limit: usize) -> Vec<OutreachRow> {
-    let mut rows: BTreeMap<String, OutreachRow> = BTreeMap::new();
-    for p in pools.iter().filter(|p| p.reach != Reach::Full) {
+/// Why one relay entry returned no tip. The reversed spelling answering
+/// comes first because it explains the failure on its own; then the kind of
+/// address the entry resolved to; then what the socket or protocol said.
+fn entry_reasons(
+    entries: &[Entry],
+    endpoints: &[Endpoint],
+    entry_endpoints: &[Vec<usize>],
+    entry_outcome: &[Option<Outcome>],
+    shadow: &Shadow,
+    asn_db: Option<&AsnDb>,
+) -> Vec<Option<&'static str>> {
+    (0..entries.len())
+        .map(|i| {
+            let f = match &entry_outcome[i] {
+                Some(Err(f)) => f,
+                _ => return None,
+            };
+            if shadow.reachable[i] == Some(true) {
+                return Some("reversed ipv4");
+            }
+            let addr = entry_endpoints[i].iter().find_map(|&x| endpoints[x].addrs.first().copied());
+            Some(match f.stage {
+                Stage::Srv => "srv",
+                Stage::Dns => "dns",
+                Stage::Handshake => "handshake",
+                Stage::Chainsync => "chainsync",
+                Stage::Connect => match addr {
+                    Some(ip) => match special_use(ip) {
+                        Some("private") => "private address",
+                        Some(_) => "reserved address",
+                        None if asn_db.is_some_and(|db| db.lookup(ip).is_none()) => "unrouted address",
+                        None => connect_reason(&f.error),
+                    },
+                    None => connect_reason(&f.error),
+                },
+            })
+        })
+        .collect()
+}
+
+/// Distinct reasons, most common first, ties alphabetical.
+fn rank_reasons(counts: impl IntoIterator<Item = (&'static str, u64)>) -> Vec<&'static str> {
+    let mut tally: BTreeMap<&'static str, u64> = BTreeMap::new();
+    for (r, n) in counts {
+        *tally.entry(r).or_default() += n;
+    }
+    let mut v: Vec<(&'static str, u64)> = tally.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    v.into_iter().map(|(r, _)| r).collect()
+}
+
+/// One row per operator. Pools are merged by the identity the index gave
+/// them; pools whose registration carries no ticker or name are merged by
+/// the domain their relays share, which is the only handle there is on them.
+fn operators(pools: &[PoolStat]) -> Vec<OutreachRow> {
+    /// Row under construction with what the merge still needs to know.
+    type Acc = (OutreachRow, Vec<String>, BTreeMap<&'static str, u64>, usize, usize);
+    let mut rows: BTreeMap<String, Acc> = BTreeMap::new();
+    for p in pools {
         let anonymous = p.meta.as_ref().is_none_or(|m| m.ticker.is_none() && m.name.is_none());
         let domain = if anonymous { operator_domain(&p.relays) } else { None };
         let key = match (&domain, &p.meta) {
@@ -658,42 +744,98 @@ fn outreach(pools: &[PoolStat], limit: usize) -> Vec<OutreachRow> {
             (None, Some(m)) => m.pool_id.clone(),
             (None, None) => p.relays.join(", "),
         };
-        let row = rows.entry(key.clone()).or_insert_with(|| OutreachRow {
-            pool_id: match &p.meta {
-                Some(m) => m.pool_id.clone(),
-                None => p.relays.first().cloned().unwrap_or_default(),
-            },
-            ticker: p.meta.as_ref().and_then(|m| m.ticker.clone()).unwrap_or_default(),
-            name: p
-                .meta
-                .as_ref()
-                .and_then(|m| m.name.clone())
-                .or(domain.clone())
-                .unwrap_or_default(),
-            reach: p.reach,
-            pools: 0,
-            relays_total: 0,
-            relays_reachable: 0,
-            relays_reversed: 0,
-            stake_ratio: 0.0,
-            relays: Vec::new(),
+        let slot = rows.entry(key).or_insert_with(|| {
+            (
+                OutreachRow {
+                    pool_id: match &p.meta {
+                        Some(m) => m.pool_id.clone(),
+                        None => p.relays.first().cloned().unwrap_or_default(),
+                    },
+                    ticker: p.meta.as_ref().and_then(|m| m.ticker.clone()).unwrap_or_default(),
+                    name: p
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.name.clone())
+                        .or(domain.clone())
+                        .unwrap_or_default(),
+                    reach: Reach::Full,
+                    pools: 0,
+                    relays_total: 0,
+                    relays_reachable: 0,
+                    relays_reversed: 0,
+                    endpoints: 0,
+                    reasons: String::new(),
+                    stake_ratio: 0.0,
+                    relays: Vec::new(),
+                },
+                Vec::new(),
+                BTreeMap::new(),
+                0,
+                0,
+            )
         });
+        let (row, eps, reasons, full, none) = slot;
         row.pools += 1;
         row.relays_total += p.relays_total as u64;
         row.relays_reachable += p.relays_reachable as u64;
         row.relays_reversed += p.relays_reversed as u64;
         row.stake_ratio += p.relative_stake;
-        if p.reach == Reach::Partial {
-            row.reach = Reach::Partial;
+        match p.reach {
+            Reach::Full => *full += 1,
+            Reach::None => *none += 1,
+            Reach::Partial => {}
         }
         for r in &p.relays {
             if !row.relays.contains(r) {
                 row.relays.push(r.clone());
             }
         }
+        for e in &p.endpoints {
+            if !eps.contains(e) {
+                eps.push(e.clone());
+            }
+        }
+        for (i, r) in p.reasons.iter().enumerate() {
+            // The pool's ranking is all we kept; weight it so the first stays first.
+            *reasons.entry(r).or_default() += (p.reasons.len() - i) as u64;
+        }
     }
-    let mut rows: Vec<OutreachRow> = rows.into_values().collect();
+    rows.into_values()
+        .map(|(mut row, eps, reasons, full, none)| {
+            row.endpoints = eps.len() as u64;
+            row.reasons = rank_reasons(reasons).join(", ");
+            row.reach = if full as u64 == row.pools {
+                Reach::Full
+            } else if none as u64 == row.pools {
+                Reach::None
+            } else {
+                Reach::Partial
+            };
+            row
+        })
+        .collect()
+}
+
+/// Operators not fully reachable, largest stake first, at most `limit`.
+fn outreach(operators: &[OutreachRow], limit: usize) -> Vec<OutreachRow> {
+    let mut rows: Vec<OutreachRow> = operators.iter().filter(|r| r.reach != Reach::Full).cloned().collect();
     rows.sort_by(|a, b| b.stake_ratio.partial_cmp(&a.stake_ratio).unwrap_or(std::cmp::Ordering::Equal));
+    rows.truncate(limit);
+    rows
+}
+
+/// Operators with the most pools per distinct relay endpoint, at most
+/// `limit`. Only operators with at least as many pools as endpoints qualify,
+/// so a single pool behind one relay is listed, one behind two is not.
+fn thin(operators: &[OutreachRow], limit: usize) -> Vec<OutreachRow> {
+    let density = |r: &OutreachRow| r.pools as f64 / r.endpoints.max(1) as f64;
+    let mut rows: Vec<OutreachRow> = operators.iter().filter(|r| r.pools >= r.endpoints.max(1)).cloned().collect();
+    rows.sort_by(|a, b| {
+        density(b)
+            .partial_cmp(&density(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.stake_ratio.partial_cmp(&a.stake_ratio).unwrap_or(std::cmp::Ordering::Equal))
+    });
     rows.truncate(limit);
     rows
 }
@@ -1024,6 +1166,8 @@ mod tests {
             fastest_rtt_ms: None,
             meta,
             relays_reversed: 0,
+            reasons: vec!["timeout"],
+            endpoints: relays.iter().map(|r| r.to_string()).collect(),
             relays: relays.iter().map(|r| r.to_string()).collect(),
         }
     }
@@ -1038,12 +1182,46 @@ mod tests {
             pool_stat(2, 0.02, named, &["r.staked.cloud:3001"]),
             pool_stat(3, 0.01, bare("pool1c"), &["203.0.113.9:3001"]),
         ];
-        let rows = outreach(&pools, 10);
+        let rows = outreach(&operators(&pools), 10);
         let by_id: BTreeMap<&str, &OutreachRow> = rows.iter().map(|r| (r.pool_id.as_str(), r)).collect();
         let staked = by_id["pool1a"];
         assert_eq!((staked.pools, staked.name.as_str(), staked.stake_ratio), (2, "staked.cloud", 0.06));
+        assert_eq!((staked.endpoints, staked.reasons.as_str()), (2, "timeout"));
         assert_eq!(by_id["pool1named"].pools, 1, "a pool with a ticker keeps its own row");
         assert_eq!(by_id["pool1c"].name, "", "an IP-only anonymous pool has no domain to merge on");
         assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn operators_merge_reach_and_reasons_and_thin_ranks_by_pools_per_endpoint() {
+        let meta = |id: &str| Some(PoolMeta { pool_id: id.into(), ticker: Some(id.to_uppercase()), name: None });
+        // An exchange: twenty pools, the same three endpoints, half reachable.
+        let mut pools: Vec<PoolStat> = (0..20)
+            .map(|i| {
+                let mut p = pool_stat(i, 0.001, meta("pool1exch"), &["a:1", "b:1", "c:1"]);
+                p.reach = if i % 2 == 0 { Reach::Full } else { Reach::None };
+                p.reasons = if i % 2 == 0 { vec![] } else { vec!["private address", "timeout"] };
+                p
+            })
+            .collect();
+        // A healthy pool with two relays of its own, and a lone pool behind one relay.
+        let mut healthy = pool_stat(20, 0.05, meta("pool1two"), &["x:1", "y:1"]);
+        healthy.reach = Reach::Full;
+        healthy.reasons = vec![];
+        pools.push(healthy);
+        pools.push(pool_stat(21, 0.002, meta("pool1one"), &["z:1"]));
+
+        let ops = operators(&pools);
+        let exch = ops.iter().find(|r| r.pool_id == "pool1exch").unwrap();
+        assert_eq!((exch.pools, exch.endpoints, exch.reach), (20, 3, Reach::Partial));
+        assert_eq!(exch.reasons, "private address, timeout", "first reason of each pool weighs most");
+
+        let thin_rows = thin(&ops, 10);
+        let ids: Vec<&str> = thin_rows.iter().map(|r| r.pool_id.as_str()).collect();
+        assert_eq!(ids, vec!["pool1exch", "pool1one"], "20 pools on 3 endpoints, then 1 on 1; 1 on 2 is not thin");
+
+        let out = outreach(&ops, 10);
+        assert!(out.iter().all(|r| r.reach != Reach::Full));
+        assert_eq!(out[0].pool_id, "pool1exch", "largest stake among the not fully reachable");
     }
 }

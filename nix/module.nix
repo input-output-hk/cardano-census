@@ -26,6 +26,15 @@
     gzip -dc "$gz" > "$db.tmp"
     mv "$db.tmp" "$db"
   '';
+
+  archiveReport = pkgs.writeShellScript "cardano-census-archive-report" ''
+    set -eu
+    dir=${lib.escapeShellArg (dirOf cfg.reportFile)}/reports
+    mkdir -p "$dir"
+    zstd -q -T0 -19 ${lib.escapeShellArg cfg.reportFile} -o "$dir/census-$(date -u +%Y%m%dT%H%M%SZ).json.zst"
+    find "$dir" -name 'census-*.json.zst' -mtime +${toString cfg.reportRetentionDays} -delete
+  '';
+  archive = cfg.reportFile != null && cfg.reportRetentionDays > 0;
 in {
   options.services.cardano-census = {
     enable = mkEnableOption "a timed reachability census of the Cardano big ledger peers";
@@ -75,6 +84,18 @@ in {
       type = types.nullOr types.str;
       default = "/var/lib/cardano-census/report.json";
       description = "Per-relay JSON report from the latest run, or null to skip it.";
+    };
+
+    reportRetentionDays = mkOption {
+      type = types.ints.unsigned;
+      default = 90;
+      description = ''
+        Keep a zstd-compressed copy of every run's report in a `reports`
+        directory beside `reportFile`, named by the run's UTC time, and delete
+        copies older than this many days. 0 keeps only the latest report.
+        A mainnet report compresses to about 90 KB, so 90 days at the default
+        interval is under 1 GB.
+      '';
     };
 
     interval = mkOption {
@@ -174,7 +195,9 @@ in {
       description = "Reachability census of the Cardano big ledger peers";
       after = ["network-online.target"];
       wants = ["network-online.target"];
-      path = optionals cfg.asnDatabase.enable (with pkgs; [coreutils curl findutils gzip]);
+      path = with pkgs;
+        optionals cfg.asnDatabase.enable [coreutils curl findutils gzip]
+        ++ optionals archive [coreutils findutils zstd];
       environment = lib.optionalAttrs cfg.asnDatabase.enable {
         SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";
       };
@@ -208,6 +231,7 @@ in {
           ++ cfg.extraArgs);
         # A failed refresh keeps the previous copy; the census runs either way.
         ExecStartPre = optional cfg.asnDatabase.enable "-${refreshAsnDatabase}";
+        ExecStartPost = optional archive "-${archiveReport}";
         TimeoutStartSec = "20min";
 
         DynamicUser = true;

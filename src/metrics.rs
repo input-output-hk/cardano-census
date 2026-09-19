@@ -318,30 +318,43 @@ pub fn render(c: &Census, labels: &[(String, String)]) -> String {
         "Pools the pool index named, 0 when no index was given",
         &c.pools_indexed.to_string(),
     );
-    if !c.top_pools.is_empty() {
-        out.family(
-            "pool_stake_ratio",
-            "gauge",
-            "Operators with the most stake among pools not fully reachable, named for outreach; pools sharing an identity are one row, and pool_id falls back to the first relay without an index",
-        );
-        for p in &c.top_pools {
+    let operator_rows = |out: &mut Out, name: &str, rows: &[crate::census::OutreachRow]| {
+        for p in rows {
             let relays = p.relays.join(", ");
             out.sample(
-                "pool_stake_ratio",
+                name,
                 &[
                     ("pool_id", &p.pool_id),
                     ("ticker", &p.ticker),
                     ("name", &p.name),
                     ("reach", p.reach.label()),
                     ("pools", &p.pools.to_string()),
+                    ("endpoints", &p.endpoints.to_string()),
                     ("relays_total", &p.relays_total.to_string()),
                     ("relays_reachable", &p.relays_reachable.to_string()),
                     ("relays_reversed", &p.relays_reversed.to_string()),
+                    ("reasons", &p.reasons),
                     ("relays", &relays),
                 ],
                 &num(p.stake_ratio),
             );
         }
+    };
+    if !c.top_pools.is_empty() {
+        out.family(
+            "pool_stake_ratio",
+            "gauge",
+            "Operators with the most stake among pools not fully reachable, named for outreach; pools sharing an identity are one row, and pool_id falls back to the first relay without an index",
+        );
+        operator_rows(&mut out, "pool_stake_ratio", &c.top_pools);
+    }
+    if !c.thin_operators.is_empty() {
+        out.family(
+            "operator_stake_ratio",
+            "gauge",
+            "Operators running the most pools per distinct relay endpoint, reachable or not; only operators with at least as many pools as endpoints",
+        );
+        operator_rows(&mut out, "operator_stake_ratio", &c.thin_operators);
     }
     out.gauge(
         "asn_db_ranges",
