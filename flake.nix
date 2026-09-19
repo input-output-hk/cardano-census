@@ -48,6 +48,8 @@
       version = "0.1.0";
       src = ./.;
     };
+
+    gitRev = self.rev or self.dirtyRev or "unknown";
   in {
     packages.${system} = rec {
       default = cardano-census;
@@ -59,6 +61,10 @@
           ];
 
           CARGO_BUILD_TARGET = "x86_64-unknown-linux-musl";
+
+          # Only the final link sees the revision, so every commit rebuilds the
+          # binary while the dependency build stays cached.
+          overrideMain = _: {GIT_REV = gitRev;};
         });
     };
 
@@ -91,6 +97,7 @@
           inherit (self.checks.${system}) clippy tests;
           devShell = self.devShells.${system}.default;
         };
+        gitrev = pkgs.writeText "gitrev" gitRev;
       };
     in
       jobs

@@ -32,6 +32,7 @@ All gauges, since each run is a fresh observation. Ratios are 0 to 1.
 
 | Metric | Meaning |
 | --- | --- |
+| `cardano_census_build_info{version,rev}` | Version and git revision of the binary that wrote the file |
 | `cardano_census_snapshot_info{source,network_magic,node_to_client_version}` | Snapshot the census was taken from. `source` is the file or the node socket |
 | `cardano_census_snapshot_slot` | Slot of the snapshot's ledger point |
 | `cardano_census_blp_total` | Big ledger pools in the snapshot |
@@ -93,4 +94,4 @@ nix develop -c cargo build
 nix flake check
 ```
 
-The nix build is a static musl binary. `nix flake check` runs clippy and the unit tests. Hydra builds `hydraJobs.required`, an aggregate of the package, both checks and the dev shell.
+The nix build is a static musl binary stamped with the git revision, shown by `--version` and in `cardano_census_build_info`. A cargo build stamps the checkout's revision, with `-dirty` when the tree has changes. `nix flake check` runs clippy and the unit tests. Hydra builds `hydraJobs.required`, an aggregate of the package, both checks, the dev shell and the revision.

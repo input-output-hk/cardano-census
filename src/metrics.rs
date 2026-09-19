@@ -54,9 +54,20 @@ fn within(out: &mut String, name: &str, help: &str, c: &Cumulative) {
     sample(out, name, &[("le", "+Inf")], &num(c.total));
 }
 
+fn build_info(out: &mut String) {
+    family(out, "build_info", "gauge", "Version and git revision of the cardano-census that wrote this");
+    sample(
+        out,
+        "build_info",
+        &[("version", crate::cli::VERSION), ("rev", crate::cli::GIT_REV)],
+        "1",
+    );
+}
+
 pub fn render(c: &Census) -> String {
     let mut out = String::new();
 
+    build_info(&mut out);
     family(&mut out, "snapshot_info", "gauge", "Snapshot the census was taken from");
     sample(
         &mut out,
@@ -172,6 +183,7 @@ pub fn render(c: &Census) -> String {
 /// Written in place of the metrics when the run could not complete.
 pub fn render_failure(timestamp_seconds: u64) -> String {
     let mut out = String::new();
+    build_info(&mut out);
     gauge(
         &mut out,
         "last_run_timestamp_seconds",

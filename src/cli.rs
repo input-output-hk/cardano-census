@@ -3,9 +3,13 @@ use std::path::PathBuf;
 
 use crate::node::parse_magic;
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Set by build.rs from the flake's `GIT_REV` or from git itself.
+pub const GIT_REV: &str = env!("CARDANO_CENSUS_GIT_REV");
+
 /// Probe every relay in a peer snapshot once and report what answered, weighted by stake.
 #[derive(Parser, Debug)]
-#[command(name = "cardano-census", version)]
+#[command(name = "cardano-census", version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("CARDANO_CENSUS_GIT_REV"), ")"))]
 pub struct Args {
     /// peerSnapshotV3 file naming the big ledger pools and their relays
     #[arg(long, value_name = "FILE", required_unless_present = "node_socket", conflicts_with = "node_socket")]
