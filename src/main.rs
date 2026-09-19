@@ -107,9 +107,20 @@ async fn run(args: &Args) -> Result<()> {
 
     let timeout = Duration::from_secs(args.timeout);
     let parallel = args.parallel.max(1);
-    let mut order: Vec<usize> = (0..endpoints.len())
-        .filter(|&i| endpoints[i].dns_error.is_none())
-        .collect();
+    // An endpoint that resolved only to private or reserved space is never
+    // dialled: nothing public can live there, and loopback or 0.0.0.0 would
+    // answer from this host's own node.
+    let mut outcomes: Vec<Option<Outcome>> = vec![None; endpoints.len()];
+    for (i, ep) in endpoints.iter().enumerate() {
+        if let Some(err) = &ep.dns_error {
+            outcomes[i] = Some(Err(Failed { stage: Stage::Dns, error: err.clone() }));
+        } else if !ep.addrs.is_empty() && ep.addrs.iter().all(|ip| asn::special_use(*ip).is_some()) {
+            let ip = ep.addrs[0];
+            let class = asn::special_use(ip).unwrap_or("reserved");
+            outcomes[i] = Some(Err(Failed { stage: Stage::Address, error: format!("{class} address {ip}, not probed") }));
+        }
+    }
+    let mut order: Vec<usize> = (0..endpoints.len()).filter(|&i| outcomes[i].is_none()).collect();
     order.shuffle(&mut rand::rng());
     let waves = order.len().div_ceil(parallel) as u64;
     eprintln!(
@@ -128,17 +139,8 @@ async fn run(args: &Args) -> Result<()> {
         .collect()
         .await;
 
-    let mut outcomes: Vec<Option<Outcome>> = vec![None; endpoints.len()];
     for (i, o) in probed {
         outcomes[i] = Some(o);
-    }
-    for (i, ep) in endpoints.iter().enumerate() {
-        if let Some(err) = &ep.dns_error {
-            outcomes[i] = Some(Err(Failed {
-                stage: Stage::Dns,
-                error: err.clone(),
-            }));
-        }
     }
 
     // Shadow probe: every IPv4 literal at its octet reversal, see reversed.rs.
@@ -154,7 +156,11 @@ async fn run(args: &Args) -> Result<()> {
     );
     let shadow_ok: HashMap<String, bool> = stream::iter(shadow_keys)
         .map(|addr| async move {
-            let ok = probe::probe(&addr, magic, timeout).await.is_ok();
+            // A reversal landing in private or reserved space is not dialled either.
+            let special = addr
+                .parse::<std::net::SocketAddr>()
+                .is_ok_and(|s| asn::special_use(s.ip()).is_some());
+            let ok = !special && probe::probe(&addr, magic, timeout).await.is_ok();
             (addr, ok)
         })
         .buffer_unordered(parallel)

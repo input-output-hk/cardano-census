@@ -20,18 +20,23 @@ use crate::net::{connect_happy_eyeballs_with_addr, ConnectError};
 pub enum Stage {
     Srv,
     Dns,
+    /// Resolved only to private or reserved space, so it was never dialled;
+    /// loopback and 0.0.0.0 would reach the census host's own node.
+    Address,
     Connect,
     Handshake,
     Chainsync,
 }
 
 impl Stage {
-    pub const ALL: [Stage; 5] = [Stage::Srv, Stage::Dns, Stage::Connect, Stage::Handshake, Stage::Chainsync];
+    pub const ALL: [Stage; 6] =
+        [Stage::Srv, Stage::Dns, Stage::Address, Stage::Connect, Stage::Handshake, Stage::Chainsync];
 
     pub fn label(self) -> &'static str {
         match self {
             Stage::Srv => "srv",
             Stage::Dns => "dns",
+            Stage::Address => "address",
             Stage::Connect => "connect",
             Stage::Handshake => "handshake",
             Stage::Chainsync => "chainsync",

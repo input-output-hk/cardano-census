@@ -47,7 +47,7 @@ All gauges, since each run is a fresh observation. Ratios are 0 to 1. `--label K
 | `cardano_census_endpoints_total` | Distinct socket addresses after resolving and deduplicating, SRV targets included |
 | `cardano_census_endpoints_probed` | Endpoints that resolved and were probed |
 | `cardano_census_relays_reachable{family="v4"\|"v6"}` | Relay entries that returned a tip, by the address family that answered |
-| `cardano_census_relays_failed{stage="srv"\|"dns"\|"connect"\|"handshake"\|"chainsync"}` | Relay entries that returned no tip, by the stage that failed |
+| `cardano_census_relays_failed{stage="srv"\|"dns"\|"address"\|"connect"\|"handshake"\|"chainsync"}` | Relay entries that returned no tip, by the stage that failed. `address` resolved only to private or reserved space and was never dialled, since nothing public lives there and loopback or 0.0.0.0 would answer from the census host's own node |
 | `cardano_census_relays_failed_connect{reason="timeout"\|"refused"\|"unreachable"\|"other"}` | The connect failures by what the socket reported. Refused is a live host with nothing on the port, unreachable a route that does not exist |
 | `cardano_census_relays_n2n_version{version}`, `cardano_census_stake_n2n_version{version}` | Answering relay entries, and the stake behind them, by the node-to-node protocol version they negotiated |
 | `cardano_census_relays_ipv4_literal` | Relay entries whose address is an IPv4 literal, each also probed with its octets reversed |

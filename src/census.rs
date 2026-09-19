@@ -704,7 +704,7 @@ fn entry_reasons(
                 Stage::Dns => "dns",
                 Stage::Handshake => "handshake",
                 Stage::Chainsync => "chainsync",
-                Stage::Connect => match addr {
+                Stage::Address | Stage::Connect => match addr {
                     Some(ip) => match special_use(ip) {
                         Some("private") => "private address",
                         Some(_) => "reserved address",
