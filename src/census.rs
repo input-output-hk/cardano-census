@@ -140,6 +140,14 @@ pub struct AsnGroup {
     pub stake_reachable_ratio: f64,
 }
 
+/// Answering relay entries that negotiated one node-to-node protocol version,
+/// with each entry carrying an equal share of its pool's stake.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct VersionGroup {
+    pub relays: u64,
+    pub stake_ratio: f64,
+}
+
 /// Where one relay entry's tip sits relative to the highest tip seen.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct EntryTip {
@@ -170,6 +178,8 @@ pub struct Census {
     pub relays_reachable_v4: u64,
     pub relays_reachable_v6: u64,
     pub relays_failed: BTreeMap<&'static str, u64>,
+    /// Answering entries by negotiated node-to-node version.
+    pub n2n_versions: BTreeMap<String, VersionGroup>,
 
     pub blp_by_reach: BTreeMap<&'static str, ReachGroup>,
     pub reachable_stake_ratio: f64,
@@ -389,6 +399,15 @@ pub fn build(
         srv_sets.entry(e.address.clone()).or_default().reach_probability = entry_probability[i];
     }
 
+    let mut n2n_versions: BTreeMap<String, VersionGroup> = BTreeMap::new();
+    for (i, e) in entries.iter().enumerate() {
+        if let Some(Ok(r)) = &entry_outcome[i] {
+            let g = n2n_versions.entry(r.n2n_version.clone()).or_default();
+            g.relays += 1;
+            g.stake_ratio += snap.pools[e.pool].relative_stake / per_pool_total[e.pool].max(1) as f64;
+        }
+    }
+
     let (entry_asn, asn_table, asn_metrics) = asn_groups(
         entries,
         endpoints,
@@ -463,6 +482,7 @@ pub fn build(
         relays_reachable_v4,
         relays_reachable_v6,
         relays_failed,
+        n2n_versions,
 
         blp_by_reach,
         reachable_stake_ratio,

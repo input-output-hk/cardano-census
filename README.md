@@ -46,6 +46,7 @@ All gauges, since each run is a fresh observation. Ratios are 0 to 1. `--label K
 | `cardano_census_endpoints_probed` | Endpoints that resolved and were probed |
 | `cardano_census_relays_reachable{family="v4"\|"v6"}` | Relay entries that returned a tip, by the address family that answered |
 | `cardano_census_relays_failed{stage="srv"\|"dns"\|"connect"\|"handshake"\|"chainsync"}` | Relay entries that returned no tip, by the stage that failed |
+| `cardano_census_relays_n2n_version{version}`, `cardano_census_stake_n2n_version{version}` | Answering relay entries, and the stake behind them, by the node-to-node protocol version they negotiated |
 | `cardano_census_blp{reach="none"\|"partial"\|"full"}` | Pools with none, some, or all of their relays answering |
 | `cardano_census_blp_stake_ratio{reach=...}` | Summed `relativeStake` of the pools in each reach class |
 | `cardano_census_reachable_stake_ratio` | Stake of pools with at least one relay answering. `partial` plus `full` |

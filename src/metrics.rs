@@ -155,6 +155,17 @@ pub fn render(c: &Census, labels: &[(String, String)]) -> String {
     out.sample("relays_reachable", &[("family", "v4")], &c.relays_reachable_v4.to_string());
     out.sample("relays_reachable", &[("family", "v6")], &c.relays_reachable_v6.to_string());
 
+    if !c.n2n_versions.is_empty() {
+        out.family("relays_n2n_version", "gauge", "Answering relay entries by the node-to-node protocol version they negotiated");
+        for (v, g) in &c.n2n_versions {
+            out.sample("relays_n2n_version", &[("version", v)], &g.relays.to_string());
+        }
+        out.family("stake_n2n_version", "gauge", "Stake behind answering relays by negotiated node-to-node version, each pool split over its relays");
+        for (v, g) in &c.n2n_versions {
+            out.sample("stake_n2n_version", &[("version", v)], &num(g.stake_ratio));
+        }
+    }
+
     out.family("relays_failed", "gauge", "Relay entries that returned no tip, by the stage that failed");
     for s in Stage::ALL {
         let n = c.relays_failed.get(s.label()).copied().unwrap_or(0);
