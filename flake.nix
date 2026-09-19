@@ -9,6 +9,11 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
+    iohk-nix = {
+      url = "github:input-output-hk/iohk-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     naersk = {
       url = "github:nix-community/naersk";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -19,6 +24,7 @@
     self,
     nixpkgs,
     fenix,
+    iohk-nix,
     naersk,
   }: let
     system = "x86_64-linux";
@@ -36,21 +42,29 @@
       cargo = toolchain;
       rustc = toolchain;
     };
+
+    crate = {
+      pname = "cardano-census";
+      version = "0.1.0";
+      src = ./.;
+    };
   in {
     packages.${system} = rec {
       default = cardano-census;
 
-      cardano-census = naersk-lib.buildPackage {
-        pname = "cardano-census";
-        version = "0.1.0";
-        src = ./.;
+      cardano-census = naersk-lib.buildPackage (crate
+        // {
+          nativeBuildInputs = with pkgs; [
+            pkgsStatic.stdenv.cc
+          ];
 
-        nativeBuildInputs = with pkgs; [
-          pkgsStatic.stdenv.cc
-        ];
+          CARGO_BUILD_TARGET = "x86_64-unknown-linux-musl";
+        });
+    };
 
-        CARGO_BUILD_TARGET = "x86_64-unknown-linux-musl";
-      };
+    checks.${system} = {
+      clippy = naersk-lib.buildPackage (crate // {mode = "clippy";});
+      tests = naersk-lib.buildPackage (crate // {mode = "test";});
     };
 
     nixosModules.default = {
@@ -69,5 +83,19 @@
         pkgs.rust-analyzer
       ];
     };
+
+    hydraJobs = let
+      jobs = {
+        ${system} = {
+          inherit (self.packages.${system}) cardano-census;
+          inherit (self.checks.${system}) clippy tests;
+          devShell = self.devShells.${system}.default;
+        };
+      };
+    in
+      jobs
+      // {
+        inherit (pkgs.callPackages iohk-nix.utils.ciJobsAggregates {ciJobs = jobs;}) required;
+      };
   };
 }

@@ -90,6 +90,7 @@ The module runs the census every 15 minutes as a oneshot service under a dynamic
 ```
 nix build
 nix develop -c cargo build
+nix flake check
 ```
 
-The nix build is a static musl binary.
+The nix build is a static musl binary. `nix flake check` runs clippy and the unit tests. Hydra builds `hydraJobs.required`, an aggregate of the package, both checks and the dev shell.

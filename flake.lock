@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "blst": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1749204514,
+        "narHash": "sha256-Q9/zGN93TnJt2c8YvSaURstoxT02ts3nVkO5V08m4TI=",
+        "owner": "supranational",
+        "repo": "blst",
+        "rev": "6d960cd05d6fe2b5bc9ba161edf0c1a131b87c4c",
+        "type": "github"
+      },
+      "original": {
+        "owner": "supranational",
+        "ref": "v0.3.15",
+        "repo": "blst",
+        "type": "github"
+      }
+    },
     "fenix": {
       "inputs": {
         "nixpkgs": [
@@ -43,6 +60,29 @@
         "type": "github"
       }
     },
+    "iohk-nix": {
+      "inputs": {
+        "blst": "blst",
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "secp256k1": "secp256k1",
+        "sodium": "sodium"
+      },
+      "locked": {
+        "lastModified": 1789502129,
+        "narHash": "sha256-CNRdu5rgFPNSiLgtT2BRJPaNzfiJeeyU5FwiC4+PH1E=",
+        "owner": "input-output-hk",
+        "repo": "iohk-nix",
+        "rev": "e6c27fbdece26694a3edcf636a2687b257361c26",
+        "type": "github"
+      },
+      "original": {
+        "owner": "input-output-hk",
+        "repo": "iohk-nix",
+        "type": "github"
+      }
+    },
     "naersk": {
       "inputs": {
         "fenix": "fenix_2",
@@ -83,6 +123,7 @@
     "root": {
       "inputs": {
         "fenix": "fenix",
+        "iohk-nix": "iohk-nix",
         "naersk": "naersk",
         "nixpkgs": "nixpkgs"
       }
@@ -118,6 +159,40 @@
         "owner": "rust-lang",
         "ref": "nightly",
         "repo": "rust-analyzer",
+        "type": "github"
+      }
+    },
+    "secp256k1": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1683999695,
+        "narHash": "sha256-9nJJVENMXjXEJZzw8DHzin1DkFkF8h9m/c6PuM7Uk4s=",
+        "owner": "bitcoin-core",
+        "repo": "secp256k1",
+        "rev": "acf5c55ae6a94e5ca847e07def40427547876101",
+        "type": "github"
+      },
+      "original": {
+        "owner": "bitcoin-core",
+        "ref": "v0.3.2",
+        "repo": "secp256k1",
+        "type": "github"
+      }
+    },
+    "sodium": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1675156279,
+        "narHash": "sha256-0uRcN5gvMwO7MCXVYnoqG/OmeBFi8qRVnDWJLnBb9+Y=",
+        "owner": "input-output-hk",
+        "repo": "libsodium",
+        "rev": "dbb48cce5429cb6585c9034f002568964f1ce567",
+        "type": "github"
+      },
+      "original": {
+        "owner": "input-output-hk",
+        "repo": "libsodium",
+        "rev": "dbb48cce5429cb6585c9034f002568964f1ce567",
         "type": "github"
       }
     }
