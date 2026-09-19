@@ -1,0 +1,161 @@
+use crate::census::{Census, Histogram, Reach};
+use crate::probe::Stage;
+
+const PREFIX: &str = "cardano_census_";
+
+fn escape(v: &str) -> String {
+    v.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+}
+
+fn family(out: &mut String, name: &str, kind: &str, help: &str) {
+    out.push_str(&format!("# HELP {PREFIX}{name} {help}\n# TYPE {PREFIX}{name} {kind}\n"));
+}
+
+fn sample(out: &mut String, name: &str, labels: &[(&str, &str)], value: &str) {
+    out.push_str(PREFIX);
+    out.push_str(name);
+    if !labels.is_empty() {
+        out.push('{');
+        for (i, (k, v)) in labels.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!("{k}=\"{}\"", escape(v)));
+        }
+        out.push('}');
+    }
+    out.push(' ');
+    out.push_str(value);
+    out.push('\n');
+}
+
+fn gauge(out: &mut String, name: &str, help: &str, value: &str) {
+    family(out, name, "gauge", help);
+    sample(out, name, &[], value);
+}
+
+fn histogram(out: &mut String, name: &str, help: &str, h: &Histogram) {
+    family(out, name, "histogram", help);
+    let bucket = format!("{name}_bucket");
+    for (b, c) in h.bounds.iter().zip(&h.counts) {
+        sample(out, &bucket, &[("le", &b.to_string())], &c.to_string());
+    }
+    sample(out, &bucket, &[("le", "+Inf")], &h.count.to_string());
+    sample(out, &format!("{name}_sum"), &[], &num(h.sum));
+    sample(out, &format!("{name}_count"), &[], &h.count.to_string());
+}
+
+pub fn render(c: &Census) -> String {
+    let mut out = String::new();
+
+    family(&mut out, "snapshot_info", "gauge", "Snapshot the census was taken from");
+    sample(
+        &mut out,
+        "snapshot_info",
+        &[
+            ("file", &c.snapshot_file),
+            ("network_magic", &c.network_magic.to_string()),
+            ("node_to_client_version", &c.node_to_client_version.to_string()),
+        ],
+        "1",
+    );
+    gauge(&mut out, "snapshot_slot", "Slot of the snapshot's ledger point", &c.snapshot_slot.to_string());
+    gauge(&mut out, "blp_total", "Big ledger pools in the snapshot", &c.blp_total.to_string());
+    gauge(
+        &mut out,
+        "snapshot_stake_ratio",
+        "Sum of relativeStake over the snapshot's pools",
+        &num(c.snapshot_stake_ratio),
+    );
+
+    gauge(&mut out, "relays_total", "Relay entries in the snapshot", &c.relays_total.to_string());
+    gauge(
+        &mut out,
+        "endpoints_total",
+        "Distinct socket addresses after resolving and deduplicating the relay entries",
+        &c.endpoints_total.to_string(),
+    );
+    gauge(&mut out, "endpoints_probed", "Endpoints that resolved and were probed", &c.endpoints_probed.to_string());
+
+    family(&mut out, "relays_reachable", "gauge", "Relay entries that returned a tip, by address family that answered");
+    sample(&mut out, "relays_reachable", &[("family", "v4")], &c.relays_reachable_v4.to_string());
+    sample(&mut out, "relays_reachable", &[("family", "v6")], &c.relays_reachable_v6.to_string());
+
+    family(&mut out, "relays_failed", "gauge", "Relay entries that returned no tip, by the stage that failed");
+    for s in Stage::ALL {
+        let n = c.relays_failed.get(s.label()).copied().unwrap_or(0);
+        sample(&mut out, "relays_failed", &[("stage", s.label())], &n.to_string());
+    }
+
+    family(&mut out, "blp", "gauge", "Pools by how many of their relays answered: none, some, or all");
+    for r in Reach::ALL {
+        let g = &c.blp_by_reach[r.label()];
+        sample(&mut out, "blp", &[("reach", r.label())], &g.pools.to_string());
+    }
+    family(&mut out, "blp_stake_ratio", "gauge", "Summed relativeStake of the pools in each reach class");
+    for r in Reach::ALL {
+        let g = &c.blp_by_reach[r.label()];
+        sample(&mut out, "blp_stake_ratio", &[("reach", r.label())], &num(g.stake_ratio));
+    }
+
+    gauge(
+        &mut out,
+        "reachable_stake_ratio",
+        "Stake of pools with at least one relay answering",
+        &num(c.reachable_stake_ratio),
+    );
+    gauge(
+        &mut out,
+        "relay_weighted_stake_ratio",
+        "Stake weighted by the share of each pool's relays that answered",
+        &num(c.relay_weighted_stake_ratio),
+    );
+    histogram(
+        &mut out,
+        "blp_relay_reachability",
+        "Pools by the share of their relays that answered",
+        &c.reachability,
+    );
+    histogram(
+        &mut out,
+        "probe_rtt_seconds",
+        "Connect through tip response for each endpoint that answered",
+        &c.rtt_seconds,
+    );
+
+    gauge(&mut out, "tip_block_max", "Highest block number reported by any relay", &c.tip_block_max.to_string());
+    gauge(&mut out, "tip_slot_max", "Highest slot reported by any relay", &c.tip_slot_max.to_string());
+
+    gauge(
+        &mut out,
+        "scan_duration_seconds",
+        "Wall time from first DNS lookup to last probe",
+        &num(c.scan_duration_seconds),
+    );
+    gauge(
+        &mut out,
+        "last_run_timestamp_seconds",
+        "When this census finished",
+        &c.timestamp_seconds.to_string(),
+    );
+    gauge(&mut out, "success", "1 if the census ran to completion", "1");
+    out
+}
+
+/// Written in place of the metrics when the run could not complete.
+pub fn render_failure(timestamp_seconds: u64) -> String {
+    let mut out = String::new();
+    gauge(
+        &mut out,
+        "last_run_timestamp_seconds",
+        "When this census finished",
+        &timestamp_seconds.to_string(),
+    );
+    gauge(&mut out, "success", "1 if the census ran to completion", "0");
+    out
+}
+
+/// Shortest representation after rounding away float noise beyond 9 decimals.
+fn num(x: f64) -> String {
+    ((x * 1e9).round() / 1e9).to_string()
+}
