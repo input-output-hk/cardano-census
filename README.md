@@ -96,7 +96,7 @@ One probe carries no chain history, so a group far behind main cannot be told ap
 
 Set `snapshotFile` instead of `nodeSocket` to read a file. With a socket the service joins `nodeSocketGroup`, `cardano-node` by default, to reach it.
 
-The module runs the census every 15 minutes as a oneshot service under a dynamic user and writes to `/var/lib/cardano-census`. `interval`, `timeout`, `parallel`, `reportFile`, `textfileDirectory` and `extraArgs` are options.
+The module runs the census every 15 minutes as a oneshot service under a dynamic user and writes to `/var/lib/cardano-census`. `interval`, `timeout`, `parallel`, `forkTolerance`, `reportFile`, `textfileDirectory` and `extraArgs` are options.
 
 ## Building
 

@@ -77,6 +77,12 @@ in {
       description = "Relays probed at once.";
     };
 
+    forkTolerance = mkOption {
+      type = types.ints.unsigned;
+      default = 10;
+      description = "Tips this many blocks apart or closer count as the same chain.";
+    };
+
     extraArgs = mkOption {
       type = types.listOf types.str;
       default = [];
@@ -112,6 +118,8 @@ in {
             (toString cfg.timeout)
             "--parallel"
             (toString cfg.parallel)
+            "--fork-tolerance"
+            (toString cfg.forkTolerance)
           ]
           ++ optionals (cfg.snapshotFile != null) ["--snapshot" cfg.snapshotFile]
           ++ optionals fromNode ["--node-socket" cfg.nodeSocket]
