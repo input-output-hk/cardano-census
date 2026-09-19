@@ -49,7 +49,8 @@
       src = ./.;
     };
 
-    gitRev = self.rev or self.dirtyRev or "unknown";
+    # A path: input carries no git information; the source hash still tells deploys apart.
+    gitRev = self.rev or self.dirtyRev or "src-${builtins.substring 0 8 (baseNameOf (toString self.outPath))}";
   in {
     packages.${system} = rec {
       default = cardano-census;
