@@ -2,6 +2,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use crate::asn::{AsInfo, AsnDb};
 use crate::probe::{Failed, Family, Outcome, Stage};
 use crate::resolve::{Endpoint, Entry};
 use crate::snapshot::Snapshot;
@@ -121,6 +122,19 @@ pub struct ChainGroup {
     pub stake_ratio: f64,
 }
 
+/// Relay entries hosted in one autonomous system, with each entry carrying an
+/// equal share of its pool's stake.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct AsnGroup {
+    /// The AS number, or `other`, `unrouted` or `unresolved` for the buckets.
+    pub asn: String,
+    pub name: String,
+    pub relays: u64,
+    pub relays_reachable: u64,
+    pub stake_ratio: f64,
+    pub stake_reachable_ratio: f64,
+}
+
 /// Where one relay entry's tip sits relative to the highest tip seen.
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct EntryTip {
@@ -169,6 +183,12 @@ pub struct Census {
     pub relays_within_blocks_of_tip: Cumulative,
     pub stake_within_blocks_of_tip: Cumulative,
 
+    /// Ranges in the AS database, 0 when none was loaded.
+    pub asn_db_ranges: u64,
+    pub asn_min_relays: u64,
+    /// Every AS seen, most relays first.
+    pub asn_table: Vec<AsnGroup>,
+
     pub scan_duration_seconds: f64,
     pub timestamp_seconds: u64,
 
@@ -176,6 +196,11 @@ pub struct Census {
     pub pools: Vec<PoolStat>,
     #[serde(skip)]
     pub entry_tips: Vec<Option<EntryTip>>,
+    /// The AS table with small ASes folded into `other`, for the metrics.
+    #[serde(skip)]
+    pub asn_metrics: Vec<AsnGroup>,
+    #[serde(skip)]
+    pub entry_asn: Vec<Option<AsInfo>>,
 }
 
 pub const REACHABILITY_BOUNDS: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
@@ -234,6 +259,8 @@ pub fn build(
     outcomes: &[Option<Outcome>],
     srv_errors: &[Option<String>],
     fork_tolerance: u64,
+    asn_db: Option<&AsnDb>,
+    asn_min_relays: usize,
     scan: Duration,
     timestamp_seconds: u64,
 ) -> Census {
@@ -343,6 +370,16 @@ pub fn build(
         srv_sets.entry(e.address.clone()).or_default();
     }
 
+    let (entry_asn, asn_table, asn_metrics) = asn_groups(
+        entries,
+        endpoints,
+        &entry_outcome,
+        &per_pool_total,
+        |pool| snap.pools[pool].relative_stake,
+        asn_db,
+        asn_min_relays,
+    );
+
     let mut rtt_seconds = Histogram::new(&RTT_BOUNDS);
     let mut tip_block_max = 0;
     let mut tip_slot_max = 0;
@@ -424,12 +461,99 @@ pub fn build(
         relays_within_blocks_of_tip,
         stake_within_blocks_of_tip,
 
+        asn_db_ranges: asn_db.map(|db| db.len() as u64).unwrap_or(0),
+        asn_min_relays: asn_min_relays as u64,
+        asn_table,
+
         scan_duration_seconds: scan.as_secs_f64(),
         timestamp_seconds,
 
         pools,
         entry_tips,
+        asn_metrics,
+        entry_asn,
     }
+}
+
+/// Place every entry in an AS by the address that answered, or the first
+/// address it resolved to, and total relays and stake per AS. The metrics
+/// view folds ASes hosting fewer than `min_relays` entries into `other`;
+/// entries with no address land in `unresolved`, those whose address no AS
+/// announces in `unrouted`.
+#[allow(clippy::type_complexity)]
+fn asn_groups(
+    entries: &[Entry],
+    endpoints: &[Endpoint],
+    entry_outcome: &[Option<Outcome>],
+    per_pool_total: &[usize],
+    pool_stake: impl Fn(usize) -> f64,
+    asn_db: Option<&AsnDb>,
+    min_relays: usize,
+) -> (Vec<Option<AsInfo>>, Vec<AsnGroup>, Vec<AsnGroup>) {
+    let Some(db) = asn_db else {
+        return (vec![None; entries.len()], Vec::new(), Vec::new());
+    };
+
+    let mut entry_addr: Vec<Option<std::net::IpAddr>> = vec![None; entries.len()];
+    for ep in endpoints {
+        for &e in &ep.entries {
+            if entry_addr[e].is_none() {
+                entry_addr[e] = ep.addrs.first().copied();
+            }
+        }
+    }
+    let entry_ip: Vec<Option<std::net::IpAddr>> = (0..entries.len())
+        .map(|i| match &entry_outcome[i] {
+            Some(Ok(r)) => Some(r.peer.ip()),
+            _ => entry_addr[i],
+        })
+        .collect();
+    let entry_asn: Vec<Option<AsInfo>> = entry_ip
+        .iter()
+        .map(|ip| ip.and_then(|ip| db.lookup(ip)).cloned())
+        .collect();
+
+    // Keyed by AS number, or by a bucket name for entries without one:
+    // `unresolved` never got an address, `unrouted` has one no AS announces.
+    let mut by_asn: BTreeMap<String, AsnGroup> = BTreeMap::new();
+    for (i, e) in entries.iter().enumerate() {
+        let share = pool_stake(e.pool) / per_pool_total[e.pool].max(1) as f64;
+        let reached = matches!(entry_outcome[i], Some(Ok(_)));
+        let (key, name) = match (&entry_asn[i], entry_ip[i]) {
+            (Some(a), _) => (a.asn.to_string(), a.name.clone()),
+            (None, Some(_)) => ("unrouted".to_string(), "unrouted".to_string()),
+            (None, None) => ("unresolved".to_string(), "unresolved".to_string()),
+        };
+        let g = by_asn
+            .entry(key.clone())
+            .or_insert_with(|| AsnGroup { asn: key, name, ..Default::default() });
+        g.relays += 1;
+        g.stake_ratio += share;
+        if reached {
+            g.relays_reachable += 1;
+            g.stake_reachable_ratio += share;
+        }
+    }
+
+    let mut table: Vec<AsnGroup> = by_asn.into_values().collect();
+    table.sort_by(|a, b| b.relays.cmp(&a.relays).then(a.asn.cmp(&b.asn)));
+
+    let mut metrics: Vec<AsnGroup> = Vec::new();
+    let mut other = AsnGroup { asn: "other".into(), name: "other".into(), ..Default::default() };
+    for g in &table {
+        if g.asn == "unrouted" || g.asn == "unresolved" || g.relays as usize >= min_relays {
+            metrics.push(g.clone());
+        } else {
+            other.relays += g.relays;
+            other.relays_reachable += g.relays_reachable;
+            other.stake_ratio += g.stake_ratio;
+            other.stake_reachable_ratio += g.stake_reachable_ratio;
+        }
+    }
+    if other.relays > 0 {
+        metrics.push(other);
+    }
+    (entry_asn, table, metrics)
 }
 
 /// Group reachable entries by tip hash, merge groups whose blocks lie within

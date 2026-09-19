@@ -43,6 +43,14 @@ pub struct Args {
     #[arg(long, default_value_t = 10)]
     pub fork_tolerance: u64,
 
+    /// iptoasn.com ip2asn TSV for placing relays in autonomous systems
+    #[arg(long, value_name = "FILE")]
+    pub asn_db: Option<PathBuf>,
+
+    /// Autonomous systems hosting fewer relays than this are folded into "other"
+    #[arg(long, default_value_t = 3)]
+    pub asn_min_relays: usize,
+
     /// Try IPv4 first instead of IPv6
     #[arg(long)]
     pub prefer_ipv4: bool,

@@ -1,6 +1,7 @@
 {
   config,
   lib,
+  pkgs,
   ...
 }: let
   cfg = config.services.cardano-census;
@@ -8,6 +9,23 @@
 
   metricsFile = "${cfg.textfileDirectory}/cardano-census.prom";
   fromNode = cfg.nodeSocket != null;
+
+  asnFile = "/var/lib/cardano-census/ip2asn.tsv";
+  refreshAsnDatabase = pkgs.writeShellScript "cardano-census-refresh-asn-db" ''
+    set -eu
+    db="$STATE_DIRECTORY/ip2asn.tsv"
+    gz="$STATE_DIRECTORY/ip2asn-combined.tsv.gz"
+    if [ -s "$db" ] && [ -z "$(find "$db" -mmin +${toString (cfg.asnDatabase.maxAgeHours * 60)})" ]; then
+      exit 0
+    fi
+    if [ -e "$gz" ]; then
+      curl -sSfL --max-time 120 -z "$gz" -o "$gz" ${lib.escapeShellArg cfg.asnDatabase.url}
+    else
+      curl -sSfL --max-time 120 -o "$gz" ${lib.escapeShellArg cfg.asnDatabase.url}
+    fi
+    gzip -dc "$gz" > "$db.tmp"
+    mv "$db.tmp" "$db"
+  '';
 in {
   options.services.cardano-census = {
     enable = mkEnableOption "a timed reachability census of the Cardano big ledger peers";
@@ -83,6 +101,32 @@ in {
       description = "Tips this many blocks apart or closer count as the same chain.";
     };
 
+    asnDatabase = {
+      enable = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Keep a copy of iptoasn.com's ip2asn database so relays are placed in autonomous systems.";
+      };
+
+      url = mkOption {
+        type = types.str;
+        default = "https://iptoasn.com/data/ip2asn-combined.tsv.gz";
+        description = "Where the gzipped ip2asn TSV is fetched from.";
+      };
+
+      maxAgeHours = mkOption {
+        type = types.ints.positive;
+        default = 24;
+        description = "Check for a newer database when the local copy is older than this.";
+      };
+
+      minRelays = mkOption {
+        type = types.ints.unsigned;
+        default = 3;
+        description = "Autonomous systems hosting fewer relays than this are folded into one `other` series.";
+      };
+    };
+
     extraArgs = mkOption {
       type = types.listOf types.str;
       default = [];
@@ -107,6 +151,10 @@ in {
       description = "Reachability census of the Cardano big ledger peers";
       after = ["network-online.target"];
       wants = ["network-online.target"];
+      path = optionals cfg.asnDatabase.enable (with pkgs; [coreutils curl findutils gzip]);
+      environment = lib.optionalAttrs cfg.asnDatabase.enable {
+        SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt";
+      };
 
       serviceConfig = {
         Type = "oneshot";
@@ -125,7 +173,15 @@ in {
           ++ optionals fromNode ["--node-socket" cfg.nodeSocket]
           ++ optionals (cfg.networkMagic != null) ["--network-magic" (toString cfg.networkMagic)]
           ++ optionals (cfg.reportFile != null) ["--report" cfg.reportFile]
+          ++ optionals cfg.asnDatabase.enable [
+            "--asn-db"
+            asnFile
+            "--asn-min-relays"
+            (toString cfg.asnDatabase.minRelays)
+          ]
           ++ cfg.extraArgs);
+        # A failed refresh keeps the previous copy; the census runs either way.
+        ExecStartPre = optional cfg.asnDatabase.enable "-${refreshAsnDatabase}";
         TimeoutStartSec = "20min";
 
         DynamicUser = true;

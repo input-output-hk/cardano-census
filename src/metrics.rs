@@ -222,6 +222,33 @@ pub fn render(c: &Census) -> String {
 
     gauge(
         &mut out,
+        "asn_db_ranges",
+        "Ranges in the loaded ip2asn database, 0 when relays could not be placed in networks",
+        &c.asn_db_ranges.to_string(),
+    );
+    if c.asn_db_ranges > 0 {
+        gauge(
+            &mut out,
+            "asn_min_relays",
+            "Autonomous systems hosting fewer relays than this are folded into other",
+            &c.asn_min_relays.to_string(),
+        );
+        type AsnValue = fn(&crate::census::AsnGroup) -> String;
+        let series: [(&str, &str, AsnValue); 4] = [
+            ("asn_relays", "Relay entries hosted in each autonomous system", |g| g.relays.to_string()),
+            ("asn_relays_reachable", "Relay entries in each autonomous system that returned a tip", |g| g.relays_reachable.to_string()),
+            ("asn_stake_ratio", "Stake hosted in each autonomous system, each pool split over its relays", |g| num(g.stake_ratio)),
+            ("asn_stake_reachable_ratio", "Stake in each autonomous system whose relays returned a tip", |g| num(g.stake_reachable_ratio)),
+        ];
+        for (name, help, value) in series {
+            family(&mut out, name, "gauge", help);
+            for g in &c.asn_metrics {
+                sample(&mut out, name, &[("asn", &g.asn), ("name", &g.name)], &value(g));
+            }
+        }
+    }
+    gauge(
+        &mut out,
         "scan_duration_seconds",
         "Wall time from first DNS lookup to last probe",
         &num(c.scan_duration_seconds),

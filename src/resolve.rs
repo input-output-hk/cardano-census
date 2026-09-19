@@ -31,6 +31,9 @@ impl Entry {
 pub struct Endpoint {
     pub key: String,
     pub entries: Vec<usize>,
+    /// Every address the key resolved to, kept so unreachable endpoints can
+    /// still be placed in a network.
+    pub addrs: Vec<IpAddr>,
     pub dns_error: Option<String>,
 }
 
@@ -209,9 +212,13 @@ async fn group(targets: &[Target], parallel: usize) -> Vec<Endpoint> {
     for l in looked.iter().filter(|l| l.literal.is_some()) {
         let key = l.literal.clone().unwrap();
         ip_to_key.entry(key.clone()).or_insert_with(|| key.clone());
-        let ep = groups
-            .entry(key.clone())
-            .or_insert_with(|| Endpoint { key, entries: Vec::new(), dns_error: None });
+        let ip = key.parse::<SocketAddr>().ok().map(|s| s.ip());
+        let ep = groups.entry(key.clone()).or_insert_with(|| Endpoint {
+            key,
+            entries: Vec::new(),
+            addrs: ip.into_iter().collect(),
+            dns_error: None,
+        });
         push_entry(ep, targets[l.target].entry);
     }
 
@@ -227,6 +234,7 @@ async fn group(targets: &[Target], parallel: usize) -> Vec<Endpoint> {
         let ep = groups.entry(key.clone()).or_insert_with(|| Endpoint {
             key: key.clone(),
             entries: Vec::new(),
+            addrs: Vec::new(),
             dns_error: l.dns_error.clone(),
         });
         push_entry(ep, target.entry);
@@ -236,6 +244,11 @@ async fn group(targets: &[Target], parallel: usize) -> Vec<Endpoint> {
         }
         for a in &l.addrs {
             ip_to_key.entry(a.clone()).or_insert_with(|| key.clone());
+            if let Some(ip) = a.parse::<SocketAddr>().ok().map(|s| s.ip()) {
+                if !ep.addrs.contains(&ip) {
+                    ep.addrs.push(ip);
+                }
+            }
         }
     }
 

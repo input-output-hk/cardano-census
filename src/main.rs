@@ -1,3 +1,4 @@
+mod asn;
 mod census;
 mod cli;
 mod metrics;
@@ -65,6 +66,17 @@ async fn run(args: &Args) -> Result<()> {
         snap.point.block_point_slot,
     );
 
+    let asn_db = args.asn_db.as_ref().and_then(|path| match asn::AsnDb::load(path) {
+        Ok(db) => {
+            eprintln!("AS database: {} ranges from {}", db.len(), path.display());
+            Some(db)
+        }
+        Err(e) => {
+            eprintln!("AS database unavailable, relays will not be placed in networks: {e:#}");
+            None
+        }
+    });
+
     let started = Instant::now();
     let resolve::Resolved { endpoints, srv_errors } = resolve::resolve(&entries, args.parallel).await;
     let unresolved = endpoints.iter().filter(|e| e.dns_error.is_some()).count();
@@ -123,6 +135,8 @@ async fn run(args: &Args) -> Result<()> {
         &outcomes,
         &srv_errors,
         args.fork_tolerance,
+        asn_db.as_ref(),
+        args.asn_min_relays,
         started.elapsed(),
         unix_now(),
     );

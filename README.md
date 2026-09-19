@@ -58,6 +58,9 @@ All gauges, since each run is a fresh observation. Ratios are 0 to 1.
 | `cardano_census_chains`, `cardano_census_fork_tolerance_blocks` | Tip groups after merging tips within the tolerance, and the tolerance used |
 | `cardano_census_chain_relays{chain="main"\|"other"}`, `cardano_census_chain_stake_ratio{chain=...}` | Answering relays and stake on the main group and on all others |
 | `cardano_census_relays_within_blocks_of_tip{le}`, `cardano_census_stake_within_blocks_of_tip{le}` | Relays, and stake by each pool's most current relay, at most `le` blocks behind the highest tip. `le` in `0 1 2 5 10 50 100 1000 +Inf` |
+| `cardano_census_asn_db_ranges`, `cardano_census_asn_min_relays` | Ranges in the loaded AS database, 0 when none, and the fold threshold |
+| `cardano_census_asn_relays{asn,name}`, `cardano_census_asn_relays_reachable{asn,name}` | Relay entries hosted in each autonomous system, and how many returned a tip |
+| `cardano_census_asn_stake_ratio{asn,name}`, `cardano_census_asn_stake_reachable_ratio{asn,name}` | Stake hosted in each autonomous system, each pool split evenly over its relays, and the reachable part |
 | `cardano_census_scan_duration_seconds` | Wall time from first DNS lookup to last probe |
 | `cardano_census_last_run_timestamp_seconds` | When the run finished |
 | `cardano_census_success` | 1 when the run completed, 0 when it could not |
@@ -71,6 +74,12 @@ When the run fails before probing, for example an unreadable snapshot, the metri
 Every answering relay reports its tip, so the run also says how the network agrees on it. Tips are grouped by hash, groups whose blocks lie within `--fork-tolerance` of each other are merged, default 10, and the group holding the most stake is `main`. A pool's stake is split evenly over its answering relays, so `chain_stake_ratio` sums to `reachable_stake_ratio`.
 
 One probe carries no chain history, so a group far behind main cannot be told apart from a fork by this alone. It is usually relays that are stuck or syncing. Read it together with `tips_at_max_block`, which counts competing hashes at the very tip, and the `*_within_blocks_of_tip` buckets, which show how far behind the tail is. Relays are probed over the whole run, so a lag of a few blocks is the run's own duration, not a relay falling behind. The report gives every relay's `lag_blocks` and whether it sits on `main_chain`, and the summary lists each group with its block range and highest hash.
+
+## Networks
+
+With `--asn-db` pointing at iptoasn.com's `ip2asn-combined.tsv`, public domain and updated hourly, every relay is placed in the autonomous system of the address that answered, or of the first address it resolved to when nothing did. That is what turns a list of failing addresses into "Hetzner relays are 40% unreachable, everyone else 10%".
+
+The `asn` series carry the AS number and its registry handle, the first word of the description, so the labels stay short and stable. Systems hosting fewer than `--asn-min-relays` relays, default 3, are folded into `asn="other"`, since a single relay down says nothing about its network. Relays that never resolved to an address land in `asn="unresolved"`, and relays whose address no system announces in `asn="unrouted"`, which is a registered relay pointing at dead address space. The report's `asn_table` has every system without the fold, and each relay carries its `asn` and `as_name`. No series is ever labelled by pool, relay or address.
 
 ## Report
 
@@ -97,6 +106,8 @@ One probe carries no chain history, so a group far behind main cannot be told ap
 Set `snapshotFile` instead of `nodeSocket` to read a file. With a socket the service joins `nodeSocketGroup`, `cardano-node` by default, to reach it.
 
 The module runs the census every 15 minutes as a oneshot service under a dynamic user and writes to `/var/lib/cardano-census`. `interval`, `timeout`, `parallel`, `forkTolerance`, `reportFile`, `textfileDirectory` and `extraArgs` are options.
+
+It also keeps the AS database current: before each run it fetches `asnDatabase.url` when the local copy is older than `asnDatabase.maxAgeHours`, default a day, and a failed fetch keeps the previous copy. `asnDatabase.minRelays` sets the fold threshold and `asnDatabase.enable = false` turns the whole thing off.
 
 ## Building
 

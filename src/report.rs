@@ -59,6 +59,10 @@ struct RelayReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     main_chain: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    asn: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    as_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     stage: Option<Stage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
@@ -161,6 +165,8 @@ pub fn render(
             rtt_ms: None,
             lag_blocks: census.entry_tips[i].map(|t| t.lag_blocks),
             main_chain: census.entry_tips[i].map(|t| t.main),
+            asn: census.entry_asn[i].as_ref().map(|a| a.asn),
+            as_name: census.entry_asn[i].as_ref().map(|a| a.name.clone()),
             stage: None,
             error: None,
         };
