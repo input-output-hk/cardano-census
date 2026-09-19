@@ -69,11 +69,12 @@ pub struct Failed {
 pub type Outcome = Result<Reached, Failed>;
 
 /// Connect, complete the N2N handshake, and ask for the tip with one FindIntersect.
-/// `timeout_duration` applies to the connect, then again to handshake plus chainsync.
-pub async fn probe(addr: &str, magic: u64, timeout_duration: Duration) -> Outcome {
+/// `budget` covers all three together, measured from the first DNS lookup.
+pub async fn probe(addr: &str, magic: u64, budget: Duration) -> Outcome {
     let started = Instant::now();
+    let deadline = started + budget;
 
-    let conn = match connect_happy_eyeballs_with_addr(addr, timeout_duration).await {
+    let conn = match connect_happy_eyeballs_with_addr(addr, budget).await {
         Ok(c) => c,
         Err(e) => {
             let stage = match e {
@@ -92,7 +93,8 @@ pub async fn probe(addr: &str, magic: u64, timeout_duration: Duration) -> Outcom
     let running = plexer.spawn();
 
     let stage = Mutex::new(Stage::Handshake);
-    let result = timeout(timeout_duration, async {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let result = timeout(remaining, async {
         let mut hs = HandshakeClient::new(hs_channel);
         let versions = n2n::VersionTable::v11_and_above(magic);
         let n2n_version = match hs.handshake(versions).await {

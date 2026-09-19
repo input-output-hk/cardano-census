@@ -1,4 +1,4 @@
-use crate::census::{Census, Histogram, Reach};
+use crate::census::{Census, Cumulative, Histogram, Reach};
 use crate::probe::Stage;
 
 const PREFIX: &str = "cardano_census_";
@@ -43,6 +43,15 @@ fn histogram(out: &mut String, name: &str, help: &str, h: &Histogram) {
     sample(out, &bucket, &[("le", "+Inf")], &h.count.to_string());
     sample(out, &format!("{name}_sum"), &[], &num(h.sum));
     sample(out, &format!("{name}_count"), &[], &h.count.to_string());
+}
+
+/// A gauge family keyed by `le`, cumulative like histogram buckets but carrying weight.
+fn within(out: &mut String, name: &str, help: &str, c: &Cumulative) {
+    family(out, name, "gauge", help);
+    for (b, v) in c.bounds.iter().zip(&c.values) {
+        sample(out, name, &[("le", &b.to_string())], &num(*v));
+    }
+    sample(out, name, &[("le", "+Inf")], &num(c.total));
 }
 
 pub fn render(c: &Census) -> String {
@@ -109,6 +118,18 @@ pub fn render(c: &Census) -> String {
         "relay_weighted_stake_ratio",
         "Stake weighted by the share of each pool's relays that answered",
         &num(c.relay_weighted_stake_ratio),
+    );
+    within(
+        &mut out,
+        "relays_reachable_within",
+        "Relay entries that returned a tip within le seconds of the first DNS lookup",
+        &c.relays_reachable_within,
+    );
+    within(
+        &mut out,
+        "stake_reachable_within",
+        "Stake of pools whose fastest relay returned a tip within le seconds",
+        &c.stake_reachable_within,
     );
     histogram(
         &mut out,

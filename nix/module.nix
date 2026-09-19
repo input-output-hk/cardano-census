@@ -45,8 +45,8 @@ in {
 
     timeout = mkOption {
       type = types.ints.positive;
-      default = 10;
-      description = "Seconds allowed for the connect, and again for handshake plus chainsync.";
+      default = 60;
+      description = "Seconds allowed per relay for DNS, connect, handshake and tip together.";
     };
 
     parallel = mkOption {

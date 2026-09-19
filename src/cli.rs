@@ -25,8 +25,8 @@ pub struct Args {
     #[arg(long, default_value_t = 3001)]
     pub port: u16,
 
-    /// Seconds allowed for the connect, and again for handshake plus chainsync
-    #[arg(long, default_value_t = 10)]
+    /// Seconds allowed per relay for DNS, connect, handshake and tip together
+    #[arg(long, default_value_t = 60)]
     pub timeout: u64,
 
     /// Relays probed at once

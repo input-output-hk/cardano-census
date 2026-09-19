@@ -13,7 +13,7 @@ The snapshot is the `peerSnapshotV3` file cardano-node 11.x reads for its big le
 
 A relay is reachable when it completes the node-to-node handshake and answers one ChainSync `FindIntersect` with its tip, within the timeout. Nothing is fetched beyond the tip, and the tip is taken as the relay reports it.
 
-The timeout applies twice: once to DNS plus connect, then again to handshake plus chainsync. A relay that connects slowly and then stalls can take close to twice the setting before it is counted as failed.
+The timeout is one budget per relay covering DNS, connect, handshake and the tip together, 60 seconds by default. It is deliberately long so that slow relays land in the `*_reachable_within` buckets below instead of being counted as failed. Pick the bucket that matches your own definition of reachable; `le="10"` is a common one.
 
 Relay entries that resolve to the same socket address are probed once and all take that result. Metrics that say `relays` count snapshot entries. Metrics that say `endpoints` count distinct addresses probed.
 
@@ -38,14 +38,16 @@ All gauges, since each run is a fresh observation. Ratios are 0 to 1.
 | `cardano_census_blp_stake_ratio{reach=...}` | Summed `relativeStake` of the pools in each reach class |
 | `cardano_census_reachable_stake_ratio` | Stake of pools with at least one relay answering. `partial` plus `full` |
 | `cardano_census_relay_weighted_stake_ratio` | Stake weighted by the share of each pool's relays that answered |
+| `cardano_census_relays_reachable_within{le}` | Relay entries that returned a tip within `le` seconds. Cumulative, `le` in `1 2.5 5 10 15 20 30 45 60 +Inf` |
+| `cardano_census_stake_reachable_within{le}` | Stake of pools whose fastest relay returned a tip within `le` seconds. Same buckets, `+Inf` equals `reachable_stake_ratio` |
 | `cardano_census_blp_relay_reachability` | Histogram of pools by the share of their relays that answered. Buckets `0`, `0.25`, `0.5`, `0.75`, `1` |
-| `cardano_census_probe_rtt_seconds` | Histogram of connect through tip response per answering endpoint. Buckets `0.05` to `10` |
+| `cardano_census_probe_rtt_seconds` | Histogram of connect through tip response per answering endpoint. Buckets `0.05` to `60` |
 | `cardano_census_tip_block_max`, `cardano_census_tip_slot_max` | Highest block and slot any relay reported |
 | `cardano_census_scan_duration_seconds` | Wall time from first DNS lookup to last probe |
 | `cardano_census_last_run_timestamp_seconds` | When the run finished |
 | `cardano_census_success` | 1 when the run completed, 0 when it could not |
 
-The gap between `reachable_stake_ratio` and `relay_weighted_stake_ratio` is how much of the reachable stake is hanging on partial relay sets. Equal values mean every pool is either fully up or fully down.
+The gap between `reachable_stake_ratio` and `relay_weighted_stake_ratio` is how much of the reachable stake is hanging on partial relay sets. Equal values mean every pool is either fully up or fully down. The spread of `stake_reachable_within` across its buckets shows how much stake is reachable only slowly.
 
 When the run fails before probing, for example an unreadable snapshot, the metrics file is replaced with just `success 0` and the timestamp, and the process exits non-zero.
 

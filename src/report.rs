@@ -21,6 +21,8 @@ struct PoolReport {
     relays_reachable: usize,
     reach: Reach,
     fraction: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fastest_rtt_ms: Option<u64>,
     relays: Vec<RelayReport>,
 }
 
@@ -72,6 +74,7 @@ pub fn render(
             relays_reachable: p.relays_reachable,
             reach: p.reach,
             fraction: p.fraction,
+            fastest_rtt_ms: p.fastest_rtt_ms,
             relays: Vec::new(),
         })
         .collect();

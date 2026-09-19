@@ -57,6 +57,33 @@ impl Histogram {
     }
 }
 
+/// Weight accumulated per `le` bound, cumulative like Prometheus buckets.
+#[derive(Clone, Debug, Serialize)]
+pub struct Cumulative {
+    pub bounds: Vec<f64>,
+    pub values: Vec<f64>,
+    pub total: f64,
+}
+
+impl Cumulative {
+    pub fn new(bounds: &[f64]) -> Self {
+        Self {
+            bounds: bounds.to_vec(),
+            values: vec![0.0; bounds.len()],
+            total: 0.0,
+        }
+    }
+
+    pub fn observe(&mut self, v: f64, weight: f64) {
+        for (i, b) in self.bounds.iter().enumerate() {
+            if v <= *b {
+                self.values[i] += weight;
+            }
+        }
+        self.total += weight;
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct PoolStat {
     pub index: usize,
@@ -65,6 +92,7 @@ pub struct PoolStat {
     pub relays_reachable: usize,
     pub reach: Reach,
     pub fraction: f64,
+    pub fastest_rtt_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -96,6 +124,8 @@ pub struct Census {
     pub relay_weighted_stake_ratio: f64,
     pub reachability: Histogram,
     pub rtt_seconds: Histogram,
+    pub relays_reachable_within: Cumulative,
+    pub stake_reachable_within: Cumulative,
 
     pub tip_block_max: u64,
     pub tip_slot_max: u64,
@@ -108,7 +138,9 @@ pub struct Census {
 }
 
 pub const REACHABILITY_BOUNDS: [f64; 5] = [0.0, 0.25, 0.5, 0.75, 1.0];
-pub const RTT_BOUNDS: [f64; 8] = [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
+pub const RTT_BOUNDS: [f64; 13] =
+    [0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0];
+pub const WITHIN_BOUNDS: [f64; 9] = [1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0];
 
 pub fn build(
     snapshot_file: &str,
@@ -144,16 +176,22 @@ pub fn build(
 
     let mut per_pool_total = vec![0usize; snap.pools.len()];
     let mut per_pool_ok = vec![0usize; snap.pools.len()];
+    let mut per_pool_fastest: Vec<Option<u64>> = vec![None; snap.pools.len()];
+    let mut relays_reachable_within = Cumulative::new(&WITHIN_BOUNDS);
     for (i, e) in entries.iter().enumerate() {
         per_pool_total[e.pool] += 1;
-        if matches!(entry_outcome[i], Some(Ok(_))) {
+        if let Some(Ok(r)) = entry_outcome[i] {
             per_pool_ok[e.pool] += 1;
+            relays_reachable_within.observe(r.rtt_ms as f64 / 1000.0, 1.0);
+            let fastest = per_pool_fastest[e.pool].get_or_insert(r.rtt_ms);
+            *fastest = (*fastest).min(r.rtt_ms);
         }
     }
 
     let mut blp_by_reach: BTreeMap<&'static str, ReachGroup> =
         Reach::ALL.iter().map(|r| (r.label(), ReachGroup::default())).collect();
     let mut reachability = Histogram::new(&REACHABILITY_BOUNDS);
+    let mut stake_reachable_within = Cumulative::new(&WITHIN_BOUNDS);
     let mut relay_weighted_stake_ratio = 0.0;
     let mut snapshot_stake_ratio = 0.0;
     let mut pools = Vec::with_capacity(snap.pools.len());
@@ -180,6 +218,10 @@ pub fn build(
         relay_weighted_stake_ratio += p.relative_stake * fraction;
         snapshot_stake_ratio += p.relative_stake;
         reachability.observe(fraction);
+        let fastest_rtt_ms = per_pool_fastest[index];
+        if let Some(ms) = fastest_rtt_ms {
+            stake_reachable_within.observe(ms as f64 / 1000.0, p.relative_stake);
+        }
 
         pools.push(PoolStat {
             index,
@@ -188,6 +230,7 @@ pub fn build(
             relays_reachable,
             reach,
             fraction,
+            fastest_rtt_ms,
         });
     }
 
@@ -225,6 +268,8 @@ pub fn build(
         relay_weighted_stake_ratio,
         reachability,
         rtt_seconds,
+        relays_reachable_within,
+        stake_reachable_within,
 
         tip_block_max,
         tip_slot_max,
