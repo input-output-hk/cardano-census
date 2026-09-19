@@ -1,5 +1,6 @@
 mod asn;
 mod census;
+mod churn;
 mod cli;
 mod metrics;
 mod net;
@@ -87,6 +88,18 @@ async fn run(args: &Args) -> Result<()> {
         }
         Err(e) => {
             eprintln!("pool index unavailable, pools will be named by their first relay: {e:#}");
+            None
+        }
+    });
+
+    // The previous run's report, read before this run overwrites it.
+    let previous = args.report.as_ref().filter(|p| p.exists()).and_then(|path| match churn::Previous::load(path) {
+        Ok(prev) => {
+            eprintln!("previous report: {} relays from {}", prev.by_key.len(), path.display());
+            Some(prev)
+        }
+        Err(e) => {
+            eprintln!("previous report unusable, no churn this run: {e:#}");
             None
         }
     });
@@ -182,6 +195,7 @@ async fn run(args: &Args) -> Result<()> {
         &outcomes,
         &srv_errors,
         &shadow,
+        previous.as_ref(),
         args.fork_tolerance,
         asn_db.as_ref(),
         args.asn_min_relays,

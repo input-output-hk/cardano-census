@@ -2,6 +2,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::census::{best_outcomes, Census, Reach};
+use crate::churn::Change;
 use crate::probe::{Family, Outcome, Stage, Tip};
 use crate::resolve::{Endpoint, Entry};
 use crate::reversed::Shadow;
@@ -88,6 +89,9 @@ struct RelayReport {
     reversed_address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reversed_reachable: Option<bool>,
+    /// How the entry's state differs from the previous report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changed: Option<Change>,
 }
 
 #[derive(Serialize)]
@@ -208,6 +212,7 @@ pub fn render(
             error: None,
             reversed_address: shadow.address[i].clone(),
             reversed_reachable: shadow.reachable[i],
+            changed: census.entry_change[i],
         };
         match &best[i] {
             Some(Ok(ok)) => {

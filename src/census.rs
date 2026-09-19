@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::asn::{special_use, AsInfo, AsnDb};
+use crate::churn::{self, Change, Churn, Previous};
 use crate::net::format_host_port;
 use crate::pools::{operator_domain, PoolIndex, PoolMeta};
 use crate::probe::{Failed, Family, Outcome, Stage};
@@ -231,6 +232,8 @@ pub struct Census {
     /// Answering entries by negotiated node-to-node version.
     pub n2n_versions: BTreeMap<String, VersionGroup>,
     pub ipv4: Ipv4Reversal,
+    /// Changes since the previous report, when one was readable.
+    pub churn: Option<Churn>,
 
     pub blp_by_reach: BTreeMap<&'static str, ReachGroup>,
     pub reachable_stake_ratio: f64,
@@ -274,6 +277,9 @@ pub struct Census {
     pub thin_operators: Vec<OutreachRow>,
     #[serde(skip)]
     pub entry_tips: Vec<Option<EntryTip>>,
+    /// Per entry, how its state changed since the previous report.
+    #[serde(skip)]
+    pub entry_change: Vec<Option<Change>>,
     /// The AS table with small ASes folded into `other`, for the metrics.
     #[serde(skip)]
     pub asn_metrics: Vec<AsnGroup>,
@@ -358,6 +364,7 @@ pub fn build(
     outcomes: &[Option<Outcome>],
     srv_errors: &[Option<String>],
     shadow: &Shadow,
+    previous: Option<&Previous>,
     fork_tolerance: u64,
     asn_db: Option<&AsnDb>,
     asn_min_relays: usize,
@@ -549,6 +556,17 @@ pub fn build(
         asn_min_relays,
     );
 
+    let (churn, entry_change) = match previous {
+        Some(prev) => {
+            let (c, changes) = churn::diff(prev, entries, &entry_outcome, &entry_asn, |i| {
+                let pool = entries[i].pool;
+                snap.pools[pool].relative_stake / per_pool_total[pool].max(1) as f64
+            });
+            (Some(c), changes)
+        }
+        None => (None, vec![None; entries.len()]),
+    };
+
     let mut rtt_seconds = Histogram::new(&RTT_BOUNDS);
     let mut tip_block_max = 0;
     let mut tip_slot_max = 0;
@@ -616,6 +634,7 @@ pub fn build(
         relays_failed_connect,
         n2n_versions,
         ipv4,
+        churn,
 
         blp_by_reach,
         reachable_stake_ratio,
@@ -647,6 +666,7 @@ pub fn build(
         top_pools,
         thin_operators,
         entry_tips,
+        entry_change,
         asn_metrics,
         entry_asn,
         entry_probability,

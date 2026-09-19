@@ -74,6 +74,8 @@ All gauges, since each run is a fresh observation. Ratios are 0 to 1. `--label K
 | `cardano_census_asn_db_ranges`, `cardano_census_asn_min_relays` | Ranges in the loaded AS database, 0 when none, and the fold threshold |
 | `cardano_census_asn_relays{asn,name}`, `cardano_census_asn_relays_reachable{asn,name}` | Relay entries hosted in each autonomous system, and how many returned a tip |
 | `cardano_census_asn_stake_ratio{asn,name}`, `cardano_census_asn_stake_reachable_ratio{asn,name}` | Stake hosted in each autonomous system, each pool split evenly over its relays, and the reachable part |
+| `cardano_census_relays_changed{to="reachable"\|"unreachable"}`, `cardano_census_stake_changed{to=...}` | Distinct relays whose state differs from the previous report, and the stake behind them with each pool split over its relays. Present only when `--report` named a readable previous report |
+| `cardano_census_relays_moved_network`, `cardano_census_previous_run_timestamp_seconds` | Relays that resolved into a different autonomous system than last run, and when that previous report was written |
 | `cardano_census_scan_duration_seconds` | Wall time from first DNS lookup to last probe |
 | `cardano_census_last_run_timestamp_seconds` | When the run finished |
 | `cardano_census_success` | 1 when the run completed, 0 when it could not |
@@ -102,7 +104,7 @@ With or without an index, `cardano_census_pool_stake_ratio` names the `--top-poo
 
 ## Report
 
-`--report` writes JSON with the same summary plus one record per relay entry: the endpoints it was probed at, which address family answered, the negotiated N2N version, the tip, the round trip, or the stage and error it failed at. An SRV entry lists every target endpoint with that target's own result, and its top-level fields describe the best one.
+`--report` writes JSON with the same summary plus one record per relay entry: the endpoints it was probed at, which address family answered, the negotiated N2N version, the tip, the round trip, or the stage and error it failed at. An SRV entry lists every target endpoint with that target's own result, and its top-level fields describe the best one. When the previous report is still there the run reads it first and marks each relay whose state differs as `changed`, and the summary's `churn` counts those relays and the stake behind them, so flapping relays show up as churn between runs rather than only as a level.
 
 ## NixOS
 

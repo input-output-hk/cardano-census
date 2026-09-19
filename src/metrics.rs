@@ -381,6 +381,24 @@ pub fn render(c: &Census, labels: &[(String, String)]) -> String {
             }
         }
     }
+    if let Some(ch) = &c.churn {
+        out.family("relays_changed", "gauge", "Distinct relays whose state differs from the previous report, by what they became");
+        out.sample("relays_changed", &[("to", "reachable")], &ch.to_reachable.to_string());
+        out.sample("relays_changed", &[("to", "unreachable")], &ch.to_unreachable.to_string());
+        out.family("stake_changed", "gauge", "Stake behind relays whose state differs from the previous report, each pool split over its relays");
+        out.sample("stake_changed", &[("to", "reachable")], &num(ch.stake_to_reachable));
+        out.sample("stake_changed", &[("to", "unreachable")], &num(ch.stake_to_unreachable));
+        out.gauge(
+            "relays_moved_network",
+            "Distinct relays that resolved into a different autonomous system than in the previous report",
+            &ch.moved_network.to_string(),
+        );
+        out.gauge(
+            "previous_run_timestamp_seconds",
+            "When the previous report the churn is measured against was written",
+            &ch.previous_timestamp_seconds.to_string(),
+        );
+    }
     out.gauge(
         "scan_duration_seconds",
         "Wall time from first DNS lookup to last probe",
