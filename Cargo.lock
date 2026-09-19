@@ -84,6 +84,7 @@ dependencies = [
  "clap",
  "futures",
  "hex",
+ "pallas-codec",
  "pallas-network",
  "rand",
  "serde",

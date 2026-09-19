@@ -103,7 +103,7 @@ pub struct ReachGroup {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Census {
-    pub snapshot_file: String,
+    pub snapshot_source: String,
     pub network_magic: u64,
     pub node_to_client_version: u64,
     pub snapshot_slot: u64,
@@ -143,7 +143,7 @@ pub const RTT_BOUNDS: [f64; 13] =
 pub const WITHIN_BOUNDS: [f64; 9] = [1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0];
 
 pub fn build(
-    snapshot_file: &str,
+    snapshot_source: &str,
     snap: &Snapshot,
     entries: &[Entry],
     endpoints: &[Endpoint],
@@ -247,7 +247,7 @@ pub fn build(
     }
 
     Census {
-        snapshot_file: snapshot_file.to_string(),
+        snapshot_source: snapshot_source.to_string(),
         network_magic: snap.network_magic,
         node_to_client_version: snap.node_to_client_version,
         snapshot_slot: snap.point.block_point_slot,

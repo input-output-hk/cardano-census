@@ -7,6 +7,7 @@
   inherit (lib) mkEnableOption mkIf mkOption optional optionals types;
 
   metricsFile = "${cfg.textfileDirectory}/cardano-census.prom";
+  fromNode = cfg.nodeSocket != null;
 in {
   options.services.cardano-census = {
     enable = mkEnableOption "a timed reachability census of the Cardano big ledger peers";
@@ -17,9 +18,30 @@ in {
     };
 
     snapshotFile = mkOption {
-      type = types.str;
+      type = types.nullOr types.str;
+      default = null;
       example = "/var/lib/cardano-node/peer-snapshot.json";
-      description = "peerSnapshotV3 file naming the pools and relays to probe.";
+      description = "peerSnapshotV3 file naming the pools and relays to probe. Set this or nodeSocket.";
+    };
+
+    nodeSocket = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      example = "/run/cardano-node/node.socket";
+      description = "Query the snapshot from this local cardano-node socket instead of a file. Needs networkMagic.";
+    };
+
+    networkMagic = mkOption {
+      type = types.nullOr types.ints.unsigned;
+      default = null;
+      example = 764824073;
+      description = "Network magic for the node handshake. Taken from the snapshot file when null.";
+    };
+
+    nodeSocketGroup = mkOption {
+      type = types.str;
+      default = "cardano-node";
+      description = "Group with write access to the node socket; the service joins it when nodeSocket is set.";
     };
 
     textfileDirectory = mkOption {
@@ -64,6 +86,17 @@ in {
   };
 
   config = mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = (cfg.snapshotFile != null) != fromNode;
+        message = "services.cardano-census: set exactly one of snapshotFile or nodeSocket";
+      }
+      {
+        assertion = !fromNode || cfg.networkMagic != null;
+        message = "services.cardano-census: nodeSocket needs networkMagic";
+      }
+    ];
+
     systemd.services.cardano-census = {
       description = "Reachability census of the Cardano big ledger peers";
       after = ["network-online.target"];
@@ -73,8 +106,6 @@ in {
         Type = "oneshot";
         ExecStart = lib.escapeShellArgs ([
             "${cfg.package}/bin/cardano-census"
-            "--snapshot"
-            cfg.snapshotFile
             "--output"
             metricsFile
             "--timeout"
@@ -82,15 +113,20 @@ in {
             "--parallel"
             (toString cfg.parallel)
           ]
+          ++ optionals (cfg.snapshotFile != null) ["--snapshot" cfg.snapshotFile]
+          ++ optionals fromNode ["--node-socket" cfg.nodeSocket]
+          ++ optionals (cfg.networkMagic != null) ["--network-magic" (toString cfg.networkMagic)]
           ++ optionals (cfg.reportFile != null) ["--report" cfg.reportFile]
           ++ cfg.extraArgs);
         TimeoutStartSec = "20min";
 
         DynamicUser = true;
+        SupplementaryGroups = optional fromNode cfg.nodeSocketGroup;
         StateDirectory = "cardano-census";
         ReadWritePaths = lib.unique (
           [cfg.textfileDirectory]
           ++ optional (cfg.reportFile != null) (dirOf cfg.reportFile)
+          ++ optional fromNode (dirOf cfg.nodeSocket)
         );
         UMask = "0022";
 

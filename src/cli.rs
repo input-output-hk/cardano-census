@@ -1,13 +1,23 @@
 use clap::Parser;
 use std::path::PathBuf;
 
+use crate::node::parse_magic;
+
 /// Probe every relay in a peer snapshot once and report what answered, weighted by stake.
 #[derive(Parser, Debug)]
 #[command(name = "cardano-census", version)]
 pub struct Args {
     /// peerSnapshotV3 file naming the big ledger pools and their relays
-    #[arg(long, value_name = "FILE")]
-    pub snapshot: PathBuf,
+    #[arg(long, value_name = "FILE", required_unless_present = "node_socket", conflicts_with = "node_socket")]
+    pub snapshot: Option<PathBuf>,
+
+    /// Query the snapshot from a local cardano-node over this socket instead
+    #[arg(long, value_name = "PATH", requires = "network_magic")]
+    pub node_socket: Option<PathBuf>,
+
+    /// Network magic, or "mainnet"; taken from the snapshot file when omitted
+    #[arg(long, value_name = "MAGIC", value_parser = parse_magic)]
+    pub network_magic: Option<u64>,
 
     /// Metrics file in node exporter textfile format; "-" writes to stdout
     #[arg(long, value_name = "FILE", default_value = "-")]
@@ -16,10 +26,6 @@ pub struct Args {
     /// Per-relay JSON report
     #[arg(long, value_name = "FILE")]
     pub report: Option<PathBuf>,
-
-    /// Network magic; defaults to the snapshot's NetworkMagic
-    #[arg(long, value_name = "MAGIC")]
-    pub network_magic: Option<u64>,
 
     /// Port for relays that list none
     #[arg(long, default_value_t = 3001)]

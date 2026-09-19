@@ -4,10 +4,13 @@ Probes every relay in a cardano-node peer snapshot once and reports how much of 
 
 ```
 cardano-census --snapshot peer-snapshot.json --output -
+cardano-census --node-socket /run/cardano-node/node.socket --network-magic mainnet --output -
 cardano-census --snapshot peer-snapshot.json --output /var/lib/cardano-census/cardano-census.prom --report /var/lib/cardano-census/report.json
 ```
 
 The snapshot is the `peerSnapshotV3` file cardano-node 11.x reads for its big ledger peers. Its `NetworkMagic` picks the network unless `--network-magic` overrides it.
+
+With `--node-socket` the snapshot is asked of a local cardano-node instead, over the node-to-client socket, so each run sees the pools the node itself would use. The socket carries no network identity, so `--network-magic` is required there. It takes a number or `mainnet`. There is no remote form of this query.
 
 ## What counts as reachable
 
@@ -25,7 +28,7 @@ All gauges, since each run is a fresh observation. Ratios are 0 to 1.
 
 | Metric | Meaning |
 | --- | --- |
-| `cardano_census_snapshot_info{file,network_magic,node_to_client_version}` | Snapshot the census was taken from |
+| `cardano_census_snapshot_info{source,network_magic,node_to_client_version}` | Snapshot the census was taken from. `source` is the file or the node socket |
 | `cardano_census_snapshot_slot` | Slot of the snapshot's ledger point |
 | `cardano_census_blp_total` | Big ledger pools in the snapshot |
 | `cardano_census_snapshot_stake_ratio` | Sum of `relativeStake` over the snapshot's pools |
@@ -63,7 +66,8 @@ When the run fails before probing, for example an unreadable snapshot, the metri
 
   services.cardano-census = {
     enable = true;
-    snapshotFile = "/var/lib/cardano-node/peer-snapshot.json";
+    nodeSocket = "/run/cardano-node/node.socket";
+    networkMagic = 764824073;
   };
 
   services.prometheus.exporters.node.extraFlags = [
@@ -71,6 +75,8 @@ When the run fails before probing, for example an unreadable snapshot, the metri
   ];
 }
 ```
+
+Set `snapshotFile` instead of `nodeSocket` to read a file. With a socket the service joins `nodeSocketGroup`, `cardano-node` by default, to reach it.
 
 The module runs the census every 15 minutes as a oneshot service under a dynamic user and writes to `/var/lib/cardano-census`. `interval`, `timeout`, `parallel`, `reportFile`, `textfileDirectory` and `extraArgs` are options.
 

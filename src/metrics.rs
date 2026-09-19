@@ -62,7 +62,7 @@ pub fn render(c: &Census) -> String {
         &mut out,
         "snapshot_info",
         &[
-            ("file", &c.snapshot_file),
+            ("source", &c.snapshot_source),
             ("network_magic", &c.network_magic.to_string()),
             ("node_to_client_version", &c.node_to_client_version.to_string()),
         ],

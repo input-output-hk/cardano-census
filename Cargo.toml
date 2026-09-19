@@ -10,6 +10,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 hex = "0.4"
+pallas-codec = "1.4"
 pallas-network = "1.4"
 rand = "0.10"
 serde = { version = "1", features = ["derive"] }

@@ -2,6 +2,7 @@ mod census;
 mod cli;
 mod metrics;
 mod net;
+mod node;
 mod output;
 mod probe;
 mod report;
@@ -41,7 +42,17 @@ async fn main() {
 async fn run(args: &Args) -> Result<()> {
     net::set_happy_eyeballs_config(!args.prefer_ipv4, args.happy_eyeballs_delay_ms);
 
-    let snap = snapshot::load(&args.snapshot)?;
+    let (snap, source) = match (&args.node_socket, &args.snapshot) {
+        (Some(socket), _) => {
+            let magic = args
+                .network_magic
+                .ok_or_else(|| anyhow::anyhow!("--node-socket needs --network-magic"))?;
+            let snap = node::fetch(socket, magic, Duration::from_secs(30)).await?;
+            (snap, socket.display().to_string())
+        }
+        (None, Some(path)) => (snapshot::load(path)?, path.display().to_string()),
+        (None, None) => anyhow::bail!("one of --snapshot or --node-socket is required"),
+    };
     let magic = args.network_magic.unwrap_or(snap.network_magic);
     let entries = resolve::entries(&snap, args.port);
 
@@ -77,7 +88,7 @@ async fn run(args: &Args) -> Result<()> {
     }
 
     let census = census::build(
-        &args.snapshot.display().to_string(),
+        &source,
         &snap,
         &entries,
         &endpoints,
