@@ -189,6 +189,33 @@ pub fn render(c: &Census, labels: &[(String, String)]) -> String {
         &num(c.reachable_stake_ratio),
     );
     out.gauge(
+        "relays_ipv4_literal",
+        "Relay entries whose address is an IPv4 literal, each also probed with its octets reversed",
+        &c.ipv4.relays.to_string(),
+    );
+    out.family(
+        "relays_ipv4_literal_reachable",
+        "gauge",
+        "IPv4 literal relay entries that returned a tip at the address as given, and at the address with its octets reversed",
+    );
+    out.sample("relays_ipv4_literal_reachable", &[("spelling", "given")], &c.ipv4.reachable_given.to_string());
+    out.sample("relays_ipv4_literal_reachable", &[("spelling", "reversed")], &c.ipv4.reachable_reversed.to_string());
+    out.gauge(
+        "pools_ipv4_reversed_only",
+        "Pools with no relay answering as given and one answering at its octet reversal",
+        &c.ipv4.pools_reversed_only.to_string(),
+    );
+    out.gauge(
+        "stake_ipv4_reversed_only_ratio",
+        "Stake of pools with no relay answering as given and one answering at its octet reversal",
+        &num(c.ipv4.stake_reversed_only_ratio),
+    );
+    out.gauge(
+        "reachable_stake_ratio_with_reversed",
+        "Stake of pools with a relay answering as given or at its octet reversal",
+        &num(c.reachable_stake_ratio + c.ipv4.stake_reversed_only_ratio),
+    );
+    out.gauge(
         "relay_weighted_stake_ratio",
         "Stake weighted by the share of each pool's relays that answered, an SRV relay by the weight of its answering targets",
         &num(c.relay_weighted_stake_ratio),

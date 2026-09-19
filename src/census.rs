@@ -7,6 +7,7 @@ use crate::net::format_host_port;
 use crate::pools::{PoolIndex, PoolMeta};
 use crate::probe::{Failed, Family, Outcome, Stage};
 use crate::resolve::{Endpoint, Entry};
+use crate::reversed::Shadow;
 use crate::snapshot::Snapshot;
 
 /// How much of a pool answered: none of its relays, some, or all.
@@ -179,6 +180,17 @@ pub struct EntryTip {
     pub main: bool,
 }
 
+/// IPv4 literal entries probed as given and at their octet reversal.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Ipv4Reversal {
+    pub relays: u64,
+    pub reachable_given: u64,
+    pub reachable_reversed: u64,
+    /// Pools with no relay answering as given and one answering reversed.
+    pub pools_reversed_only: u64,
+    pub stake_reversed_only_ratio: f64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Census {
     pub snapshot_source: String,
@@ -204,6 +216,7 @@ pub struct Census {
     pub relays_failed: BTreeMap<&'static str, u64>,
     /// Answering entries by negotiated node-to-node version.
     pub n2n_versions: BTreeMap<String, VersionGroup>,
+    pub ipv4: Ipv4Reversal,
 
     pub blp_by_reach: BTreeMap<&'static str, ReachGroup>,
     pub reachable_stake_ratio: f64,
@@ -309,6 +322,7 @@ pub fn build(
     endpoints: &[Endpoint],
     outcomes: &[Option<Outcome>],
     srv_errors: &[Option<String>],
+    shadow: &Shadow,
     fork_tolerance: u64,
     asn_db: Option<&AsnDb>,
     asn_min_relays: usize,
@@ -349,7 +363,9 @@ pub fn build(
             *fastest = (*fastest).min(r.rtt_ms);
         }
     }
-
+    let ipv4 = ipv4_reversal(entries, &entry_outcome, shadow, &per_pool_ok, |pool| {
+        snap.pools[pool].relative_stake
+    });
 
     let mut blp_by_reach: BTreeMap<&'static str, ReachGroup> =
         Reach::ALL.iter().map(|r| (r.label(), ReachGroup::default())).collect();
@@ -533,6 +549,7 @@ pub fn build(
         relays_reachable_v6,
         relays_failed,
         n2n_versions,
+        ipv4,
 
         blp_by_reach,
         reachable_stake_ratio,
@@ -567,6 +584,31 @@ pub fn build(
         entry_asn,
         entry_probability,
     }
+}
+
+/// Count IPv4 literal entries answering as given and reversed, and the pools
+/// that only the reversal reaches.
+fn ipv4_reversal(
+    entries: &[Entry],
+    entry_outcome: &[Option<Outcome>],
+    shadow: &Shadow,
+    per_pool_ok: &[usize],
+    stake_of: impl Fn(usize) -> f64,
+) -> Ipv4Reversal {
+    let mut r = Ipv4Reversal::default();
+    let mut reversed_only_pools: Vec<usize> = Vec::new();
+    for (i, e) in entries.iter().enumerate() {
+        let Some(reversed) = shadow.reachable[i] else { continue };
+        r.relays += 1;
+        r.reachable_given += matches!(entry_outcome[i], Some(Ok(_))) as u64;
+        r.reachable_reversed += reversed as u64;
+        if reversed && per_pool_ok[e.pool] == 0 && !reversed_only_pools.contains(&e.pool) {
+            reversed_only_pools.push(e.pool);
+        }
+    }
+    r.pools_reversed_only = reversed_only_pools.len() as u64;
+    r.stake_reversed_only_ratio = reversed_only_pools.iter().map(|&p| stake_of(p)).sum::<f64>() + 0.0;
+    r
 }
 
 /// Merge not-fully-reachable pools by identity, rank by stake, keep `limit`.
@@ -881,5 +923,34 @@ mod tests {
         assert!((p[0] - 0.75).abs() < 1e-12, "30 of 40 weight answered");
         assert!((p[1] - 1.0 / 3.0).abs() < 1e-12, "all weights zero falls back to 1 of 3 targets");
         assert_eq!(p[2], 0.0, "a plain relay that failed");
+    }
+
+    #[test]
+    fn ipv4_reversal_counts_entries_and_pools_only_the_reversal_reaches() {
+        let entries = vec![
+            Entry { pool: 0, address: "20.61.229.103".into(), port: Some(3001) },
+            Entry { pool: 0, address: "relay.example".into(), port: Some(3001) },
+            Entry { pool: 1, address: "170.23.181.50".into(), port: Some(6001) },
+            Entry { pool: 2, address: "198.51.100.7".into(), port: Some(3001) },
+            Entry { pool: 2, address: "198.51.100.8".into(), port: Some(3001) },
+        ];
+        let outcomes = vec![Some(failed()), Some(failed()), Some(reached()), Some(failed()), Some(failed())];
+        let shadow = Shadow {
+            address: vec![Some("103.229.61.20:3001".into()), None, Some("50.181.23.170:6001".into()), Some("7.100.51.198:3001".into()), Some("8.100.51.198:3001".into())],
+            reachable: vec![Some(true), None, Some(false), Some(true), Some(true)],
+        };
+        let r = ipv4_reversal(&entries, &outcomes, &shadow, &[0, 1, 0], |p| [0.1, 0.2, 0.3][p]);
+        assert_eq!(
+            r,
+            Ipv4Reversal {
+                relays: 4,
+                reachable_given: 1,
+                reachable_reversed: 3,
+                pools_reversed_only: 2,
+                stake_reversed_only_ratio: 0.4,
+            }
+        );
+        let none = ipv4_reversal(&entries, &outcomes, &Shadow::none(entries.len()), &[0, 1, 0], |_| 1.0);
+        assert_eq!(none, Ipv4Reversal::default());
     }
 }

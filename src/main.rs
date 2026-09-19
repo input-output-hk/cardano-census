@@ -9,12 +9,14 @@ mod pools;
 mod probe;
 mod report;
 mod resolve;
+mod reversed;
 mod snapshot;
 
 use anyhow::Result;
 use clap::Parser;
 use futures::stream::{self, StreamExt};
 use rand::seq::SliceRandom;
+use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use cli::Args;
@@ -139,6 +141,33 @@ async fn run(args: &Args) -> Result<()> {
         }
     }
 
+    // Shadow probe: every IPv4 literal at its octet reversal, see reversed.rs.
+    let shadow_address = reversed::targets(&entries);
+    let mut shadow_keys: Vec<String> = shadow_address.iter().flatten().cloned().collect();
+    shadow_keys.sort();
+    shadow_keys.dedup();
+    shadow_keys.shuffle(&mut rand::rng());
+    eprintln!(
+        "probing the octet reversal of {} IPv4 literal relays at {} distinct addresses",
+        shadow_address.iter().flatten().count(),
+        shadow_keys.len(),
+    );
+    let shadow_ok: HashMap<String, bool> = stream::iter(shadow_keys)
+        .map(|addr| async move {
+            let ok = probe::probe(&addr, magic, timeout).await.is_ok();
+            (addr, ok)
+        })
+        .buffer_unordered(parallel)
+        .collect()
+        .await;
+    let shadow = reversed::Shadow {
+        reachable: shadow_address
+            .iter()
+            .map(|a| a.as_ref().map(|k| shadow_ok.get(k).copied().unwrap_or(false)))
+            .collect(),
+        address: shadow_address,
+    };
+
     let census = census::build(
         &source,
         &snap,
@@ -146,6 +175,7 @@ async fn run(args: &Args) -> Result<()> {
         &endpoints,
         &outcomes,
         &srv_errors,
+        &shadow,
         args.fork_tolerance,
         asn_db.as_ref(),
         args.asn_min_relays,
@@ -162,7 +192,7 @@ async fn run(args: &Args) -> Result<()> {
     if let Some(path) = &args.report {
         output::write(
             path,
-            &report::render(&census, &snap, &entries, &endpoints, &outcomes, &srv_errors)?,
+            &report::render(&census, &snap, &entries, &endpoints, &outcomes, &srv_errors, &shadow)?,
         )?;
     }
 

@@ -26,6 +26,8 @@ A relay entry without a port is an SRV record name, which is how the ledger regi
 
 Stake is the snapshot's `relativeStake`, a share of total ledger stake taken from the pool distribution the node uses for the current epoch. It is fixed at the epoch boundary and does not follow live delegation. The snapshot stops adding pools once their stake reaches 90%, so `cardano_census_snapshot_stake_ratio` reads about 0.9 on every well formed snapshot.
 
+Every relay entry whose address is an IPv4 literal is also probed at that address with its four octets reversed. cardano-node 11.1.0 through 11.1.2 decode the ledger's IPv4 relay bytes in the wrong order, so a relay registered as `20.61.229.103` appears in the snapshot, and is dialled by the node, as `103.229.61.20`. The `ipv4` metrics count entries answering under each spelling and the pools that only the reversal reaches; they do not change the reachability metrics above, which keep describing what the node sees. On a node with the codec fixed the reversed spelling of a correct address almost never answers, so `relays_ipv4_literal_reachable{spelling="reversed"}` and `stake_ipv4_reversed_only_ratio` read near zero.
+
 ## Metrics
 
 All gauges, since each run is a fresh observation. Ratios are 0 to 1. `--label KEY=VALUE`, repeatable, stamps a label on every series, for an `environment` or `group` the scraper would not add itself; a series that already carries the same label name keeps its own.
@@ -47,6 +49,10 @@ All gauges, since each run is a fresh observation. Ratios are 0 to 1. `--label K
 | `cardano_census_relays_reachable{family="v4"\|"v6"}` | Relay entries that returned a tip, by the address family that answered |
 | `cardano_census_relays_failed{stage="srv"\|"dns"\|"connect"\|"handshake"\|"chainsync"}` | Relay entries that returned no tip, by the stage that failed |
 | `cardano_census_relays_n2n_version{version}`, `cardano_census_stake_n2n_version{version}` | Answering relay entries, and the stake behind them, by the node-to-node protocol version they negotiated |
+| `cardano_census_relays_ipv4_literal` | Relay entries whose address is an IPv4 literal, each also probed with its octets reversed |
+| `cardano_census_relays_ipv4_literal_reachable{spelling="given"\|"reversed"}` | IPv4 literal entries that returned a tip at the address as given, and at its octet reversal |
+| `cardano_census_pools_ipv4_reversed_only`, `cardano_census_stake_ipv4_reversed_only_ratio` | Pools with no relay answering as given and one answering at its octet reversal, and their stake |
+| `cardano_census_reachable_stake_ratio_with_reversed` | `reachable_stake_ratio` plus `stake_ipv4_reversed_only_ratio`; what reachability reads once the node spells IPv4 relays correctly |
 | `cardano_census_blp{reach="none"\|"partial"\|"full"}` | Pools with none, some, or all of their relays answering |
 | `cardano_census_blp_stake_ratio{reach=...}` | Summed `relativeStake` of the pools in each reach class |
 | `cardano_census_reachable_stake_ratio` | Stake of pools with at least one relay answering. `partial` plus `full` |

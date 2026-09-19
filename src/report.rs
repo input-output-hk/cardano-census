@@ -4,6 +4,7 @@ use serde::Serialize;
 use crate::census::{best_outcomes, Census, Reach};
 use crate::probe::{Family, Outcome, Stage, Tip};
 use crate::resolve::{Endpoint, Entry};
+use crate::reversed::Shadow;
 use crate::snapshot::Snapshot;
 
 #[derive(Serialize)]
@@ -75,6 +76,12 @@ struct RelayReport {
     stage: Option<Stage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// For an IPv4 literal, the address with its octets reversed and whether
+    /// that answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reversed_address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reversed_reachable: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -125,6 +132,7 @@ pub fn render(
     endpoints: &[Endpoint],
     outcomes: &[Option<Outcome>],
     srv_errors: &[Option<String>],
+    shadow: &Shadow,
 ) -> Result<String> {
     let mut entry_endpoints: Vec<Vec<usize>> = vec![Vec::new(); entries.len()];
     for (i, ep) in endpoints.iter().enumerate() {
@@ -189,6 +197,8 @@ pub fn render(
             as_name: census.entry_asn[i].as_ref().map(|a| a.name.clone()),
             stage: None,
             error: None,
+            reversed_address: shadow.address[i].clone(),
+            reversed_reachable: shadow.reachable[i],
         };
         match &best[i] {
             Some(Ok(ok)) => {
