@@ -212,7 +212,7 @@ fn decode_snapshot(d: &mut Decoder) -> Result<Decoded> {
             expect_array(d, 3, "snapshot body")?;
             let point = decode_point(d)?;
             let magic = u64::from(d.u32()?);
-            let pools = decode_pools(d)?;
+            let pools = decode_pools_flat(d)?;
             Ok(Decoded {
                 pools,
                 point,
@@ -255,6 +255,29 @@ fn decode_pools(d: &mut Decoder) -> Result<Vec<Pool>> {
         expect_array(d, 2, "pool")?;
         let accumulated_stake = decode_rational(d)?;
         expect_array(d, 2, "pool stake and relays")?;
+        let relative_stake = decode_rational(d)?;
+        let mut relays = Vec::new();
+        for_each(d, |d| {
+            relays.push(decode_relay(d)?);
+            Ok(())
+        })?;
+        pools.push(Pool {
+            accumulated_stake,
+            relative_stake,
+            relays,
+        });
+        Ok(())
+    })?;
+    Ok(pools)
+}
+
+/// `[(accumulatedStake, relativeStake, [relay])]`, the version-2 body from
+/// ouroboros-network 1.2: one flat 3-element array per pool.
+fn decode_pools_flat(d: &mut Decoder) -> Result<Vec<Pool>> {
+    let mut pools = Vec::new();
+    for_each(d, |d| {
+        expect_array(d, 3, "pool")?;
+        let accumulated_stake = decode_rational(d)?;
         let relative_stake = decode_rational(d)?;
         let mut relays = Vec::new();
         for_each(d, |d| {
@@ -470,12 +493,47 @@ mod tests {
         e.array(3).unwrap();
         e.array(3).unwrap().u8(1).unwrap().u64(42).unwrap().bytes(&[0xab; 32]).unwrap();
         e.u32(764824073).unwrap();
-        e.array(0).unwrap();
+        // Version 2 pools are flat: [acc, rel, relays].
+        e.begin_array().unwrap();
+        e.array(3).unwrap();
+        rational(&mut e, 1, 100);
+        rational(&mut e, 1, 100);
+        e.array(2).unwrap();
+        e.array(3).unwrap().u8(0).unwrap().u16(3001).unwrap().bytes(b"relay.example.org").unwrap();
+        e.array(3).unwrap().u8(1).unwrap().u16(6000).unwrap();
+        e.array(4).unwrap().u8(10).unwrap().u8(0).unwrap().u8(0).unwrap().u8(1).unwrap();
+        e.array(3).unwrap();
+        rational(&mut e, 3, 100);
+        rational(&mut e, 2, 100);
+        e.array(1).unwrap();
+        e.array(2).unwrap().u8(3).unwrap().bytes(b"_cardano._tcp.example.org").unwrap();
+        e.end().unwrap();
         let decoded = decode_response(&e.into_writer()).unwrap();
         assert_eq!(decoded.magic, Some(764824073));
         assert_eq!(decoded.point.as_ref().unwrap().0, 42);
         assert_eq!(decoded.point.as_ref().unwrap().1.len(), 64);
-        assert!(decoded.pools.is_empty());
+        assert_eq!(decoded.pools.len(), 2);
+        assert!((decoded.pools[0].accumulated_stake - 0.01).abs() < 1e-12);
+        assert_eq!(decoded.pools[0].relays[1].address, "10.0.0.1");
+        assert!((decoded.pools[1].relative_stake - 0.02).abs() < 1e-12);
+        assert_eq!(decoded.pools[1].relays[0].port, None);
+    }
+
+    #[test]
+    fn v23_snapshot_rejects_the_nested_pool_shape() {
+        let mut e = Encoder::new(Vec::new());
+        e.array(1).unwrap();
+        e.array(2).unwrap().u8(2).unwrap();
+        e.array(3).unwrap();
+        e.array(1).unwrap().u8(0).unwrap();
+        e.u32(1).unwrap();
+        e.array(1).unwrap();
+        e.array(2).unwrap();
+        rational(&mut e, 1, 100);
+        e.array(2).unwrap();
+        rational(&mut e, 1, 100);
+        e.array(0).unwrap();
+        assert!(decode_response(&e.into_writer()).is_err());
     }
 
     #[test]
