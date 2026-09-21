@@ -774,7 +774,9 @@ fn operators(pools: &[PoolStat]) -> Vec<OutreachRow> {
     type Acc = (OutreachRow, Vec<Vec<String>>, BTreeMap<&'static str, u64>, usize, usize);
     let mut rows: BTreeMap<String, Acc> = BTreeMap::new();
     for p in pools {
-        let anonymous = p.meta.as_ref().is_none_or(|m| m.ticker.is_none() && m.name.is_none());
+        // Only a pool the index knows but cannot name; without an index every
+        // pool keeps its own row, or provider domains would swallow strangers.
+        let anonymous = p.meta.as_ref().is_some_and(|m| m.ticker.is_none() && m.name.is_none());
         let domain = if anonymous { operator_domain(&p.relays) } else { None };
         let key = match (&domain, &p.meta) {
             (Some(d), _) => format!("domain:{d}"),
@@ -1266,6 +1268,8 @@ mod tests {
             pool_stat(1, 0.03, bare("pool1b"), &["113.cardano.staked.cloud:3001"]),
             pool_stat(2, 0.02, named, &["r.staked.cloud:3001"]),
             pool_stat(3, 0.01, bare("pool1c"), &["203.0.113.9:3001"]),
+            pool_stat(4, 0.005, None, &["x.staked.cloud:3001"]),
+            pool_stat(5, 0.005, None, &["y.staked.cloud:3001"]),
         ];
         let rows = outreach(&operators(&pools), 10);
         let by_id: BTreeMap<&str, &OutreachRow> = rows.iter().map(|r| (r.pool_id.as_str(), r)).collect();
@@ -1274,7 +1278,9 @@ mod tests {
         assert_eq!((staked.endpoints, staked.reasons.as_str()), (2, "timeout"));
         assert_eq!(by_id["pool1named"].pools, 1, "a pool with a ticker keeps its own row");
         assert_eq!(by_id["pool1c"].name, "", "an IP-only anonymous pool has no domain to merge on");
-        assert_eq!(rows.len(), 3);
+        assert_eq!(by_id["x.staked.cloud:3001"].pools, 1, "without an index a pool is its own row, whatever its domain");
+        assert_eq!(by_id["y.staked.cloud:3001"].name, "", "and gets no domain name either");
+        assert_eq!(rows.len(), 5);
     }
 
     #[test]
