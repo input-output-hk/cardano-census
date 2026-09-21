@@ -228,7 +228,7 @@ async fn run(args: &Args) -> Result<()> {
     if let Some(path) = &args.report {
         output::write(
             path,
-            &report::render(&census, &snap, &entries, &endpoints, &outcomes, &srv_errors, &shadow)?,
+            &report::render(&census, &snap, &entries, &endpoints, &outcomes, &srv_errors, &shadow, previous.as_ref())?,
         )?;
     }
 

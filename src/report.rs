@@ -2,7 +2,9 @@ use anyhow::Result;
 use serde::Serialize;
 
 use crate::census::{best_outcomes, Census, Reach};
-use crate::churn::Change;
+use crate::churn::{Change, Previous};
+use crate::pools::relay_key;
+use crate::resolve::REMEMBER_SECS;
 use crate::probe::{Family, Outcome, Stage, Tip};
 use crate::resolve::{Endpoint, Entry};
 use crate::reversed::Shadow;
@@ -143,6 +145,7 @@ fn target_report(endpoint: &Endpoint, entry: usize, outcome: Option<&Outcome>, n
     t
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     census: &Census,
     snap: &Snapshot,
@@ -151,6 +154,7 @@ pub fn render(
     outcomes: &[Option<Outcome>],
     srv_errors: &[Option<String>],
     shadow: &Shadow,
+    previous: Option<&Previous>,
 ) -> Result<String> {
     let mut entry_endpoints: Vec<Vec<usize>> = vec![Vec::new(); entries.len()];
     for (i, ep) in endpoints.iter().enumerate() {
@@ -197,11 +201,38 @@ pub fn render(
             srv: e.is_srv(),
             endpoints: eps.iter().map(|&x| endpoints[x].key.clone()).collect(),
             // Every target of a name, SRV or plain, so the next run knows which
-            // addresses it has seen; an IP literal is its own address.
+            // addresses it has seen; an IP literal is its own address. A name
+            // that failed to resolve keeps its remembered addresses listed,
+            // unprobed and failed, so one resolver hiccup does not erase a set
+            // that took hours to accumulate.
             targets: if e.address.trim_matches(&['[', ']'][..]).parse::<std::net::IpAddr>().is_err() {
-                eps.iter()
+                let mut targets: Vec<TargetReport> = eps
+                    .iter()
                     .map(|&x| target_report(&endpoints[x], i, outcomes[x].as_ref(), census.timestamp_seconds))
-                    .collect()
+                    .collect();
+                if let (Some(Err(f)), Some(prev)) = (&best[i], previous) {
+                    if f.stage == Stage::Dns && !e.is_srv() {
+                        let now = census.timestamp_seconds;
+                        for (endpoint, last_seen) in prev.targets.get(&relay_key(&e.address, e.port)).into_iter().flatten() {
+                            if now.saturating_sub(*last_seen) <= REMEMBER_SECS
+                                && endpoint.parse::<std::net::SocketAddr>().is_ok()
+                                && !targets.iter().any(|t| t.endpoint == *endpoint)
+                            {
+                                targets.push(TargetReport {
+                                    endpoint: endpoint.clone(),
+                                    weight: None,
+                                    last_seen: *last_seen,
+                                    remembered: true,
+                                    reachable: false,
+                                    rtt_ms: None,
+                                    stage: Some(Stage::Dns),
+                                    error: Some("name did not resolve this run, address kept from an earlier one".into()),
+                                });
+                            }
+                        }
+                    }
+                }
+                targets
             } else {
                 Vec::new()
             },

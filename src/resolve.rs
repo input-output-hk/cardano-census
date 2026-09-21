@@ -270,11 +270,13 @@ fn assemble(targets: &[Target], looked: &[Looked], memory: Option<&Memory<'_>>) 
     }
 
     // Plain names only: an SRV lookup returns every target, and a literal is
-    // its own address.
+    // its own address. A name whose lookup failed this run gets no memory
+    // either, since no node can dial it now and remembered addresses would
+    // otherwise keep it reachable for a day.
     if let Some(memory) = memory {
         for (t, target) in targets.iter().enumerate() {
-            let literal = looked.iter().any(|l| l.target == t && l.literal.is_some());
-            if target.weight.is_some() || literal {
+            let own = looked.iter().find(|l| l.target == t);
+            if target.weight.is_some() || own.is_none_or(|l| l.literal.is_some() || l.dns_error.is_some()) {
                 continue;
             }
             let Some(seen) = memory.targets.get(&relay_key(&target.host, Some(target.port))) else { continue };
@@ -342,11 +344,17 @@ mod tests {
 
     #[test]
     fn remembered_addresses_join_within_retention_only() {
-        let targets = vec![target(0, "relays.example", 3001, None), target(1, "1.2.3.4", 3001, None), target(2, "srv.example", 6000, Some(5))];
+        let targets = vec![
+            target(0, "relays.example", 3001, None),
+            target(1, "1.2.3.4", 3001, None),
+            target(2, "srv.example", 6000, Some(5)),
+            target(3, "gone.example", 3001, None),
+        ];
         let looked = vec![
             Looked { target: 0, literal: None, addrs: vec!["192.0.2.1:3001".into()], dns_error: None },
             Looked { target: 1, literal: Some("1.2.3.4:3001".into()), addrs: vec![], dns_error: None },
             Looked { target: 2, literal: None, addrs: vec!["192.0.2.9:6000".into()], dns_error: None },
+            Looked { target: 3, literal: None, addrs: vec![], dns_error: Some("no such host".into()) },
         ];
         let now = 1_000_000;
         let mem = HashMap::from([
@@ -357,10 +365,17 @@ mod tests {
             ]),
             ("1.2.3.4:3001".to_string(), vec![("9.9.9.9:3001".to_string(), now)]),
             ("srv.example".to_string(), vec![("192.0.2.8:6000".to_string(), now)]),
+            ("gone.example:3001".to_string(), vec![("192.0.2.7:3001".to_string(), now - 60)]),
         ]);
         let eps = assemble(&targets, &looked, Some(&Memory { targets: &mem, now }));
         let keys: Vec<&str> = eps.iter().map(|e| e.key.as_str()).collect();
-        assert_eq!(keys, vec!["1.2.3.4:3001", "192.0.2.1:3001", "192.0.2.2:3001", "192.0.2.9:6000"], "one remembered address added, the stale one dropped, literals and SRV untouched");
+        assert_eq!(
+            keys,
+            vec!["1.2.3.4:3001", "192.0.2.1:3001", "192.0.2.2:3001", "192.0.2.9:6000", "gone.example:3001"],
+            "one remembered address added, the stale one dropped, literals and SRV untouched, a name that failed to resolve gets no memory"
+        );
+        let gone = eps.iter().find(|e| e.key == "gone.example:3001").unwrap();
+        assert_eq!(gone.dns_error.as_deref(), Some("no such host"));
         let fresh = eps.iter().find(|e| e.key == "192.0.2.1:3001").unwrap();
         assert!(!fresh.remembered, "returned this run, so not remembered");
         let old = eps.iter().find(|e| e.key == "192.0.2.2:3001").unwrap();
