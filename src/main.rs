@@ -33,7 +33,13 @@ fn unix_now() -> u64 {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    if let Err(e) = run(&args).await {
+    // A run that systemd stops still leaves success 0 behind rather than the
+    // previous run's file.
+    let result = tokio::select! {
+        r = run(&args) => r,
+        _ = terminated() => Err(anyhow::anyhow!("terminated before the run finished")),
+    };
+    if let Err(e) = result {
         eprintln!("cardano-census: {e:#}");
         if !args.output_is_stdout() {
             if let Err(w) = output::write(&args.output, &metrics::render_failure(unix_now(), &args.labels)) {
@@ -41,6 +47,15 @@ async fn main() {
             }
         }
         std::process::exit(1);
+    }
+}
+
+async fn terminated() {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut sig) => {
+            sig.recv().await;
+        }
+        Err(_) => std::future::pending().await,
     }
 }
 

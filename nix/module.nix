@@ -231,16 +231,20 @@ in {
         # A failed refresh keeps the previous copy; the census runs either way.
         ExecStartPre = optional cfg.asnDatabase.enable "-${refreshAsnDatabase}";
         ExecStartPost = optional archive "-${archiveReport}";
-        TimeoutStartSec = "20min";
+        # Worst case is every endpoint spending the whole budget, twice for the
+        # reversal pass, over as many as 4096 endpoints, plus the refreshes.
+        TimeoutStartSec = toString (2 * cfg.timeout * ((4096 + cfg.parallel - 1) / cfg.parallel) + 300);
 
         DynamicUser = true;
         SupplementaryGroups = optional fromNode cfg.nodeSocketGroup;
         StateDirectory = "cardano-census";
-        ReadWritePaths = lib.unique (
+        # Prefixed so a directory another unit has not created yet, the node's
+        # runtime directory at boot for one, does not fail the unit's setup.
+        ReadWritePaths = map (p: "-${p}") (lib.unique (
           [cfg.textfileDirectory]
           ++ optional (cfg.reportFile != null) (dirOf cfg.reportFile)
           ++ optional fromNode (dirOf cfg.nodeSocket)
-        );
+        ));
         UMask = "0022";
 
         CapabilityBoundingSet = "";
