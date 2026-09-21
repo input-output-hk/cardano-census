@@ -110,6 +110,10 @@ pub struct PoolStat {
     pub reasons: Vec<&'static str>,
     /// Distinct socket addresses the pool's relays resolved to.
     pub endpoints: Vec<String>,
+    /// The same addresses grouped by the relay entry they came from, for
+    /// counting hosts: an entry with both families is dual-stacked hosts.
+    #[serde(skip)]
+    pub relay_endpoints: Vec<Vec<String>>,
     /// The pool's relay entries as written in the snapshot.
     #[serde(skip)]
     pub relays: Vec<String>,
@@ -478,12 +482,15 @@ pub fn build(
             })
             .collect();
         let mut pool_endpoints: Vec<String> = Vec::new();
+        let mut relay_endpoints: Vec<Vec<String>> = Vec::new();
         for &i in &own {
-            for &x in &entry_endpoints[i] {
-                if !pool_endpoints.contains(&endpoints[x].key) {
-                    pool_endpoints.push(endpoints[x].key.clone());
+            let keys: Vec<String> = entry_endpoints[i].iter().map(|&x| endpoints[x].key.clone()).collect();
+            for k in &keys {
+                if !pool_endpoints.contains(k) {
+                    pool_endpoints.push(k.clone());
                 }
             }
+            relay_endpoints.push(keys);
         }
         let reasons = rank_reasons(own.iter().filter_map(|&i| entry_reason[i]).map(|r| (r, 1)));
 
@@ -500,6 +507,7 @@ pub fn build(
             relays_reversed,
             reasons,
             endpoints: pool_endpoints,
+            relay_endpoints,
             relays,
         });
     }
@@ -761,8 +769,9 @@ fn rank_reasons(counts: impl IntoIterator<Item = (&'static str, u64)>) -> Vec<&'
 /// them; pools whose registration carries no ticker or name are merged by
 /// the domain their relays share, which is the only handle there is on them.
 fn operators(pools: &[PoolStat]) -> Vec<OutreachRow> {
-    /// Row under construction with what the merge still needs to know.
-    type Acc = (OutreachRow, Vec<String>, BTreeMap<&'static str, u64>, usize, usize);
+    /// Row under construction with what the merge still needs to know: the
+    /// endpoint keys per relay entry, reason weights, full and none counts.
+    type Acc = (OutreachRow, Vec<Vec<String>>, BTreeMap<&'static str, u64>, usize, usize);
     let mut rows: BTreeMap<String, Acc> = BTreeMap::new();
     for p in pools {
         let anonymous = p.meta.as_ref().is_none_or(|m| m.ticker.is_none() && m.name.is_none());
@@ -818,11 +827,7 @@ fn operators(pools: &[PoolStat]) -> Vec<OutreachRow> {
                 row.relays.push(r.clone());
             }
         }
-        for e in &p.endpoints {
-            if !eps.contains(e) {
-                eps.push(e.clone());
-            }
-        }
+        eps.extend(p.relay_endpoints.iter().cloned());
         for (i, r) in p.reasons.iter().enumerate() {
             // The pool's ranking is all we kept; weight it so the first stays first.
             *reasons.entry(r).or_default() += (p.reasons.len() - i) as u64;
@@ -844,19 +849,37 @@ fn operators(pools: &[PoolStat]) -> Vec<OutreachRow> {
         .collect()
 }
 
-/// How many relay hosts stand behind these endpoint keys. A dual-stacked host
-/// is one relay, so the larger address family counts and the smaller is
-/// assumed to be the same hosts; a name that never resolved counts as one.
-fn distinct_endpoints(keys: &[String]) -> u64 {
-    let (mut v4, mut v6, mut names) = (0u64, 0u64, 0u64);
-    for k in keys {
-        match k.parse::<std::net::SocketAddr>() {
-            Ok(s) if s.is_ipv4() => v4 += 1,
-            Ok(_) => v6 += 1,
-            Err(_) => names += 1,
+/// How many relay hosts stand behind these endpoint keys, grouped by the relay
+/// entry that produced them. Address families are paired only within one
+/// entry: a name answering both A and AAAA is one set of dual-stacked hosts,
+/// so its IPv6 addresses add nothing, while an entry with only IPv6 addresses
+/// is IPv6-only hosts and counts in full. Addresses shared between entries
+/// count once; a name that never resolved counts as one host.
+fn distinct_endpoints(groups: &[Vec<String>]) -> u64 {
+    use std::collections::BTreeSet;
+    let mut v4: BTreeSet<&str> = BTreeSet::new();
+    let mut v6_only: BTreeSet<&str> = BTreeSet::new();
+    let mut names: BTreeSet<&str> = BTreeSet::new();
+    for group in groups {
+        let parsed: Vec<(&str, Option<std::net::SocketAddr>)> =
+            group.iter().map(|k| (k.as_str(), k.parse().ok())).collect();
+        let has_v4 = parsed.iter().any(|(_, s)| s.is_some_and(|s| s.is_ipv4()));
+        for (k, s) in parsed {
+            match s {
+                Some(s) if s.is_ipv4() => {
+                    v4.insert(k);
+                }
+                Some(_) if !has_v4 => {
+                    v6_only.insert(k);
+                }
+                Some(_) => {}
+                None => {
+                    names.insert(k);
+                }
+            }
         }
     }
-    v4.max(v6) + names
+    (v4.len() + v6_only.len() + names.len()) as u64
 }
 
 /// Operators not fully reachable, largest stake first, at most `limit`.
@@ -1190,12 +1213,18 @@ mod tests {
     }
 
     #[test]
-    fn distinct_endpoints_counts_hosts_not_addresses() {
-        let s = |v: &[&str]| v.iter().map(|k| k.to_string()).collect::<Vec<_>>();
-        assert_eq!(distinct_endpoints(&s(&["192.0.2.1:3001", "192.0.2.2:3001", "192.0.2.3:3001"])), 3);
-        assert_eq!(distinct_endpoints(&s(&["192.0.2.1:3001", "[2001:db8::1]:3001"])), 1, "dual stack is one host");
-        assert_eq!(distinct_endpoints(&s(&["[2001:db8::1]:3001", "[2001:db8::2]:3001", "192.0.2.1:3001"])), 2);
-        assert_eq!(distinct_endpoints(&s(&["dead.example:3001", "192.0.2.1:3001"])), 2, "an unresolved name is one relay");
+    fn distinct_endpoints_pairs_families_within_one_entry_only() {
+        let g = |v: &[&[&str]]| v.iter().map(|e| e.iter().map(|k| k.to_string()).collect::<Vec<_>>()).collect::<Vec<_>>();
+        // A name with three A records is three hosts.
+        assert_eq!(distinct_endpoints(&g(&[&["192.0.2.1:3001", "192.0.2.2:3001", "192.0.2.3:3001"]])), 3);
+        // A name answering both families is dual-stacked hosts: the IPv6 side adds nothing.
+        assert_eq!(distinct_endpoints(&g(&[&["192.0.2.1:3001", "192.0.2.2:3001", "[2001:db8::1]:3001", "[2001:db8::2]:3001"]])), 2);
+        // Separate entries are separate hosts, IPv6-only ones included.
+        assert_eq!(distinct_endpoints(&g(&[&["192.0.2.1:3001"], &["[2001:db8::9]:3001"]])), 2);
+        // Two names on the same address are one host.
+        assert_eq!(distinct_endpoints(&g(&[&["192.0.2.1:3001"], &["192.0.2.1:3001", "192.0.2.5:3001"]])), 2);
+        // An unresolved name is one host.
+        assert_eq!(distinct_endpoints(&g(&[&["dead.example:3001"], &["192.0.2.1:3001"]])), 2);
         assert_eq!(distinct_endpoints(&[]), 0);
     }
 
@@ -1223,6 +1252,7 @@ mod tests {
             relays_reversed: 0,
             reasons: vec!["timeout"],
             endpoints: relays.iter().map(|r| r.to_string()).collect(),
+            relay_endpoints: relays.iter().map(|r| vec![r.to_string()]).collect(),
             relays: relays.iter().map(|r| r.to_string()).collect(),
         }
     }
