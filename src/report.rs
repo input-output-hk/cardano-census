@@ -100,6 +100,11 @@ struct TargetReport {
     endpoint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     weight: Option<u16>,
+    /// When a lookup last returned this address; the next run carries it
+    /// forward for a day if the name stops returning it.
+    last_seen: u64,
+    /// Known from an earlier run only, not from this run's lookup.
+    remembered: bool,
     reachable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     rtt_ms: Option<u64>,
@@ -109,7 +114,7 @@ struct TargetReport {
     error: Option<String>,
 }
 
-fn target_report(endpoint: &Endpoint, entry: usize, outcome: Option<&Outcome>) -> TargetReport {
+fn target_report(endpoint: &Endpoint, entry: usize, outcome: Option<&Outcome>, now: u64) -> TargetReport {
     let mut t = TargetReport {
         endpoint: endpoint.key.clone(),
         weight: endpoint
@@ -117,6 +122,8 @@ fn target_report(endpoint: &Endpoint, entry: usize, outcome: Option<&Outcome>) -
             .iter()
             .position(|&e| e == entry)
             .and_then(|i| endpoint.weights[i]),
+        last_seen: endpoint.last_seen.unwrap_or(now),
+        remembered: endpoint.remembered,
         reachable: false,
         rtt_ms: None,
         stage: None,
@@ -189,11 +196,11 @@ pub fn render(
             port: e.port,
             srv: e.is_srv(),
             endpoints: eps.iter().map(|&x| endpoints[x].key.clone()).collect(),
-            // Every target of an SRV name, or every address of a name with
-            // several; a single-address relay has nothing to add.
-            targets: if e.is_srv() || eps.len() > 1 {
+            // Every target of a name, SRV or plain, so the next run knows which
+            // addresses it has seen; an IP literal is its own address.
+            targets: if e.address.trim_matches(&['[', ']'][..]).parse::<std::net::IpAddr>().is_err() {
                 eps.iter()
-                    .map(|&x| target_report(&endpoints[x], i, outcomes[x].as_ref()))
+                    .map(|&x| target_report(&endpoints[x], i, outcomes[x].as_ref(), census.timestamp_seconds))
                     .collect()
             } else {
                 Vec::new()

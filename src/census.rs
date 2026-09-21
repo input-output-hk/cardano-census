@@ -224,6 +224,8 @@ pub struct Census {
     pub srv_endpoints_reachable: u64,
     pub endpoints_total: u64,
     pub endpoints_probed: u64,
+    /// Endpoints known only from earlier runs' lookups of the same name.
+    pub endpoints_remembered: u64,
     pub relays_reachable_v4: u64,
     pub relays_reachable_v6: u64,
     pub relays_failed: BTreeMap<&'static str, u64>,
@@ -633,6 +635,7 @@ pub fn build(
             .iter()
             .filter(|o| !matches!(o, Some(Err(f)) if matches!(f.stage, Stage::Dns | Stage::Address) || f.error.ends_with("not probed")))
             .count() as u64,
+        endpoints_remembered: endpoints.iter().filter(|e| e.remembered).count() as u64,
         relays_reachable_v4,
         relays_reachable_v6,
         relays_failed,
@@ -1131,6 +1134,8 @@ mod tests {
             weights: entries.iter().map(|e| e.1).collect(),
             addrs: Vec::new(),
             dns_error: None,
+            remembered: false,
+            last_seen: None,
         }
     }
 

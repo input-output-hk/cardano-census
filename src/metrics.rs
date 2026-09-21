@@ -152,6 +152,11 @@ pub fn render(c: &Census, labels: &[(String, String)]) -> String {
         &c.endpoints_total.to_string(),
     );
     out.gauge("endpoints_probed", "Endpoints that resolved and were probed", &c.endpoints_probed.to_string());
+    out.gauge(
+        "endpoints_remembered",
+        "Endpoints a relay name resolved to in an earlier run within the last day but not this one, probed as well",
+        &c.endpoints_remembered.to_string(),
+    );
 
     out.family("relays_reachable", "gauge", "Relay entries that returned a tip, by address family that answered");
     out.sample("relays_reachable", &[("family", "v4")], &c.relays_reachable_v4.to_string());

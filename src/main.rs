@@ -104,8 +104,14 @@ async fn run(args: &Args) -> Result<()> {
         }
     });
 
+    let memory = previous.as_ref().map(|p| resolve::Memory { targets: &p.targets, now: unix_now() });
+
     let started = Instant::now();
-    let resolve::Resolved { endpoints, srv_errors } = resolve::resolve(&entries, args.parallel).await;
+    let resolve::Resolved { endpoints, srv_errors } = resolve::resolve(&entries, args.parallel, memory.as_ref()).await;
+    let remembered = endpoints.iter().filter(|e| e.remembered).count();
+    if remembered > 0 {
+        eprintln!("{remembered} endpoints remembered from earlier runs' lookups");
+    }
     let unresolved = endpoints.iter().filter(|e| e.dns_error.is_some()).count();
     let srv_total = entries.iter().filter(|e| e.is_srv()).count();
     let srv_failed = srv_errors.iter().flatten().count();

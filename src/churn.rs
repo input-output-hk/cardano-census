@@ -20,6 +20,10 @@ pub struct PrevState {
 /// Relay states from the previous report, keyed like the pool index keys relays.
 pub struct Previous {
     pub by_key: HashMap<String, PrevState>,
+    /// Per relay name, every address a run has seen it resolve to and when it
+    /// was last seen, so a name that hands out a subset of its records per
+    /// lookup accumulates across runs.
+    pub targets: HashMap<String, Vec<(String, u64)>>,
     pub timestamp_seconds: u64,
 }
 
@@ -45,6 +49,16 @@ struct PrevRelay {
     port: Option<u16>,
     reachable: bool,
     asn: Option<u32>,
+    #[serde(default)]
+    endpoints: Vec<String>,
+    #[serde(default)]
+    targets: Vec<PrevTarget>,
+}
+
+#[derive(Deserialize)]
+struct PrevTarget {
+    endpoint: String,
+    last_seen: Option<u64>,
 }
 
 impl Previous {
@@ -52,14 +66,28 @@ impl Previous {
         let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let report: PrevReport =
             serde_json::from_str(&text).with_context(|| format!("parsing {} as a census report", path.display()))?;
+        let then = report.summary.timestamp_seconds;
         let mut by_key = HashMap::new();
+        let mut targets: HashMap<String, Vec<(String, u64)>> = HashMap::new();
         for r in report.pools.iter().flat_map(|p| &p.relays) {
             // Every pool listing the same relay saw the same result.
-            by_key
-                .entry(relay_key(&r.address, r.port))
-                .or_insert(PrevState { reachable: r.reachable, asn: r.asn });
+            let key = relay_key(&r.address, r.port);
+            if by_key.contains_key(&key) {
+                continue;
+            }
+            by_key.insert(key.clone(), PrevState { reachable: r.reachable, asn: r.asn });
+            // Reports from before targets carried last_seen listed the addresses
+            // under endpoints; either way an address without a time was seen then.
+            let seen: Vec<(String, u64)> = if r.targets.is_empty() {
+                r.endpoints.iter().map(|e| (e.clone(), then)).collect()
+            } else {
+                r.targets.iter().map(|t| (t.endpoint.clone(), t.last_seen.unwrap_or(then))).collect()
+            };
+            if !seen.is_empty() {
+                targets.insert(key, seen);
+            }
         }
-        Ok(Self { by_key, timestamp_seconds: report.summary.timestamp_seconds })
+        Ok(Self { by_key, targets, timestamp_seconds: then })
     }
 }
 
@@ -159,6 +187,7 @@ mod tests {
     fn diff_counts_relays_once_and_stake_per_entry() {
         let prev = Previous {
             timestamp_seconds: 100,
+            targets: HashMap::new(),
             by_key: HashMap::from([
                 ("shared.example:3001".to_string(), PrevState { reachable: true, asn: Some(1) }),
                 ("up.example:3001".to_string(), PrevState { reachable: false, asn: Some(2) }),
