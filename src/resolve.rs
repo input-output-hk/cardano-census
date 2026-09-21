@@ -204,9 +204,15 @@ async fn group(targets: &[Target], parallel: usize) -> Vec<Endpoint> {
 
     looked.extend(looked_up);
     looked.sort_by_key(|l| l.target);
+    assemble(targets, &looked)
+}
 
+/// One endpoint per socket address. A name with several addresses becomes
+/// one endpoint per address, as a node treats each as its own peer; an
+/// address shared by names and literals is one endpoint with every entry on
+/// it. A name that did not resolve keeps one endpoint under its own name.
+fn assemble(targets: &[Target], looked: &[Looked]) -> Vec<Endpoint> {
     let mut groups: HashMap<String, Endpoint> = HashMap::new();
-    let mut ip_to_key: HashMap<String, String> = HashMap::new();
 
     // Two SRV records of one name landing on the same endpoint add their weights.
     let push_entry = |ep: &mut Endpoint, entry: usize, weight: Option<u16>| {
@@ -223,53 +229,65 @@ async fn group(targets: &[Target], parallel: usize) -> Vec<Endpoint> {
         }
     };
 
-    // IP literals define the first groups.
-    for l in looked.iter().filter(|l| l.literal.is_some()) {
-        let key = l.literal.clone().unwrap();
-        ip_to_key.entry(key.clone()).or_insert_with(|| key.clone());
-        let ip = key.parse::<SocketAddr>().ok().map(|s| s.ip());
-        let ep = groups.entry(key.clone()).or_insert_with(|| Endpoint {
-            key,
-            entries: Vec::new(),
-            weights: Vec::new(),
-            addrs: ip.into_iter().collect(),
-            dns_error: None,
-        });
-        push_entry(ep, targets[l.target].entry, targets[l.target].weight);
-    }
-
-    // Hostnames join the group of any address they resolve to, else start their own.
-    for l in looked.iter().filter(|l| l.literal.is_none()) {
+    for l in looked {
         let target = &targets[l.target];
-        let own_key = format_host_port(&target.host, target.port);
-        let key = l
-            .addrs
-            .iter()
-            .find_map(|a| ip_to_key.get(a).cloned())
-            .unwrap_or(own_key);
-        let ep = groups.entry(key.clone()).or_insert_with(|| Endpoint {
-            key: key.clone(),
-            entries: Vec::new(),
-            weights: Vec::new(),
-            addrs: Vec::new(),
-            dns_error: l.dns_error.clone(),
-        });
-        push_entry(ep, target.entry, target.weight);
-        // One good lookup for this name is enough to probe it.
-        if l.dns_error.is_none() {
-            ep.dns_error = None;
-        }
-        for a in &l.addrs {
-            ip_to_key.entry(a.clone()).or_insert_with(|| key.clone());
-            if let Some(ip) = a.parse::<SocketAddr>().ok().map(|s| s.ip()) {
-                if !ep.addrs.contains(&ip) {
-                    ep.addrs.push(ip);
-                }
-            }
+        let keys: Vec<String> = match &l.literal {
+            Some(k) => vec![k.clone()],
+            None if l.addrs.is_empty() => vec![format_host_port(&target.host, target.port)],
+            None => l.addrs.clone(),
+        };
+        for key in keys {
+            let ip = key.parse::<SocketAddr>().ok().map(|s| s.ip());
+            let ep = groups.entry(key.clone()).or_insert_with(|| Endpoint {
+                key: key.clone(),
+                entries: Vec::new(),
+                weights: Vec::new(),
+                addrs: ip.into_iter().collect(),
+                dns_error: l.dns_error.clone(),
+            });
+            push_entry(ep, target.entry, target.weight);
         }
     }
 
     let mut out: Vec<Endpoint> = groups.into_values().collect();
     out.sort_by(|a, b| a.key.cmp(&b.key));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(entry: usize, host: &str, port: u16, weight: Option<u16>) -> Target {
+        Target { entry, host: host.into(), port, weight }
+    }
+
+    #[test]
+    fn names_expand_to_one_endpoint_per_address_and_share_with_literals() {
+        let targets = vec![
+            target(0, "relays.example", 3001, None),
+            target(1, "relays.example", 3001, None),
+            target(2, "192.0.2.1", 3001, None),
+            target(3, "dead.example", 3001, None),
+            target(4, "srv-a.example", 6000, Some(10)),
+        ];
+        let looked = vec![
+            Looked { target: 0, literal: None, addrs: vec!["192.0.2.1:3001".into(), "192.0.2.2:3001".into(), "[2001:db8::1]:3001".into()], dns_error: None },
+            Looked { target: 1, literal: None, addrs: vec!["192.0.2.1:3001".into(), "192.0.2.2:3001".into(), "[2001:db8::1]:3001".into()], dns_error: None },
+            Looked { target: 2, literal: Some("192.0.2.1:3001".into()), addrs: vec![], dns_error: None },
+            Looked { target: 3, literal: None, addrs: vec![], dns_error: Some("no such host".into()) },
+            Looked { target: 4, literal: None, addrs: vec!["192.0.2.9:6000".into()], dns_error: None },
+        ];
+        let eps = assemble(&targets, &looked);
+        let keys: Vec<&str> = eps.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(keys, vec!["192.0.2.1:3001", "192.0.2.2:3001", "192.0.2.9:6000", "[2001:db8::1]:3001", "dead.example:3001"]);
+        let shared = eps.iter().find(|e| e.key == "192.0.2.1:3001").unwrap();
+        assert_eq!(shared.entries, vec![0, 1, 2], "two pools' name and one literal on one address");
+        assert_eq!(shared.addrs, vec!["192.0.2.1".parse::<IpAddr>().unwrap()]);
+        let dead = eps.iter().find(|e| e.key == "dead.example:3001").unwrap();
+        assert_eq!(dead.dns_error.as_deref(), Some("no such host"));
+        assert!(dead.addrs.is_empty());
+        let srv = eps.iter().find(|e| e.key == "192.0.2.9:6000").unwrap();
+        assert_eq!(srv.weights, vec![Some(10)]);
+    }
 }

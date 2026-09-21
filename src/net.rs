@@ -39,6 +39,14 @@ impl fmt::Display for ConnectError {
     }
 }
 
+/// Whether this host has a route to the public IPv6 internet. A UDP connect
+/// only selects the route, nothing is sent.
+pub fn has_ipv6_route() -> bool {
+    std::net::UdpSocket::bind("[::]:0")
+        .and_then(|s| s.connect("[2001:4860:4860::8888]:53"))
+        .is_ok()
+}
+
 /// host:port for display and keys, bracketing IPv6 literals.
 pub fn format_host_port(host: &str, port: u16) -> String {
     if host.starts_with('[') {

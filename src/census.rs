@@ -627,7 +627,12 @@ pub fn build(
         srv_endpoints_total,
         srv_endpoints_reachable,
         endpoints_total: endpoints.len() as u64,
-        endpoints_probed: endpoints.iter().filter(|e| e.dns_error.is_none()).count() as u64,
+        // Resolved and actually dialled: not a DNS failure, not special-use
+        // space, not an IPv6 address from a host without an IPv6 route.
+        endpoints_probed: outcomes
+            .iter()
+            .filter(|o| !matches!(o, Some(Err(f)) if matches!(f.stage, Stage::Dns | Stage::Address) || f.error.ends_with("not probed")))
+            .count() as u64,
         relays_reachable_v4,
         relays_reachable_v6,
         relays_failed,
@@ -822,7 +827,7 @@ fn operators(pools: &[PoolStat]) -> Vec<OutreachRow> {
     }
     rows.into_values()
         .map(|(mut row, eps, reasons, full, none)| {
-            row.endpoints = eps.len() as u64;
+            row.endpoints = distinct_endpoints(&eps);
             row.reasons = rank_reasons(reasons).join(", ");
             row.reach = if full as u64 == row.pools {
                 Reach::Full
@@ -834,6 +839,21 @@ fn operators(pools: &[PoolStat]) -> Vec<OutreachRow> {
             row
         })
         .collect()
+}
+
+/// How many relay hosts stand behind these endpoint keys. A dual-stacked host
+/// is one relay, so the larger address family counts and the smaller is
+/// assumed to be the same hosts; a name that never resolved counts as one.
+fn distinct_endpoints(keys: &[String]) -> u64 {
+    let (mut v4, mut v6, mut names) = (0u64, 0u64, 0u64);
+    for k in keys {
+        match k.parse::<std::net::SocketAddr>() {
+            Ok(s) if s.is_ipv4() => v4 += 1,
+            Ok(_) => v6 += 1,
+            Err(_) => names += 1,
+        }
+    }
+    v4.max(v6) + names
 }
 
 /// Operators not fully reachable, largest stake first, at most `limit`.
@@ -1162,6 +1182,16 @@ mod tests {
         );
         let none = ipv4_reversal(&entries, &outcomes, &Shadow::none(entries.len()), &[0, 1, 0], |_| 1.0);
         assert_eq!(none, Ipv4Reversal::default());
+    }
+
+    #[test]
+    fn distinct_endpoints_counts_hosts_not_addresses() {
+        let s = |v: &[&str]| v.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+        assert_eq!(distinct_endpoints(&s(&["192.0.2.1:3001", "192.0.2.2:3001", "192.0.2.3:3001"])), 3);
+        assert_eq!(distinct_endpoints(&s(&["192.0.2.1:3001", "[2001:db8::1]:3001"])), 1, "dual stack is one host");
+        assert_eq!(distinct_endpoints(&s(&["[2001:db8::1]:3001", "[2001:db8::2]:3001", "192.0.2.1:3001"])), 2);
+        assert_eq!(distinct_endpoints(&s(&["dead.example:3001", "192.0.2.1:3001"])), 2, "an unresolved name is one relay");
+        assert_eq!(distinct_endpoints(&[]), 0);
     }
 
     #[test]

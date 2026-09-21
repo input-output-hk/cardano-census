@@ -123,6 +123,10 @@ async fn run(args: &Args) -> Result<()> {
     // An endpoint that resolved only to private or reserved space is never
     // dialled: nothing public can live there, and loopback or 0.0.0.0 would
     // answer from this host's own node.
+    let ipv6 = net::has_ipv6_route();
+    if !ipv6 {
+        eprintln!("no IPv6 route from this host, IPv6 addresses are not probed");
+    }
     let mut outcomes: Vec<Option<Outcome>> = vec![None; endpoints.len()];
     for (i, ep) in endpoints.iter().enumerate() {
         if let Some(err) = &ep.dns_error {
@@ -131,6 +135,12 @@ async fn run(args: &Args) -> Result<()> {
             let ip = ep.addrs[0];
             let class = asn::special_use(ip).unwrap_or("reserved");
             outcomes[i] = Some(Err(Failed { stage: Stage::Address, error: format!("{class} address {ip}, not probed") }));
+        } else if !ipv6 && !ep.addrs.is_empty() && ep.addrs.iter().all(|ip| ip.is_ipv6()) {
+            let ip = ep.addrs[0];
+            outcomes[i] = Some(Err(Failed {
+                stage: Stage::Connect,
+                error: format!("IPv6 unreachable from the census host, {ip} not probed"),
+            }));
         }
     }
     let mut order: Vec<usize> = (0..endpoints.len()).filter(|&i| outcomes[i].is_none()).collect();

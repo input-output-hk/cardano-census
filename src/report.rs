@@ -49,7 +49,8 @@ struct RelayReport {
     /// Every endpoint this entry was probed at. One for a plain relay, one per
     /// top-priority SRV target otherwise.
     endpoints: Vec<String>,
-    /// Each SRV target's own result; empty for a plain relay.
+    /// Each target's own result for an SRV name or a name with several
+    /// addresses; empty for a relay with one address.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     targets: Vec<TargetReport>,
     /// For an SRV record, the weight of answering targets over all of them.
@@ -188,7 +189,9 @@ pub fn render(
             port: e.port,
             srv: e.is_srv(),
             endpoints: eps.iter().map(|&x| endpoints[x].key.clone()).collect(),
-            targets: if e.is_srv() {
+            // Every target of an SRV name, or every address of a name with
+            // several; a single-address relay has nothing to add.
+            targets: if e.is_srv() || eps.len() > 1 {
                 eps.iter()
                     .map(|&x| target_report(&endpoints[x], i, outcomes[x].as_ref()))
                     .collect()
