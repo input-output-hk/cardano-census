@@ -174,8 +174,7 @@ in {
     extraArgs = mkOption {
       type = types.listOf types.str;
       default = [];
-      example = ["--prefer-ipv4"];
-      description = "Further command line arguments.";
+      description = "Further command line arguments. Every current option has a module setting; this is for ones a newer package adds.";
     };
   };
 

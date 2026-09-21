@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
-use crate::net::{connect_happy_eyeballs_with_addr, ConnectError};
+use crate::net::{connect, ConnectError};
 
 /// How far a failed probe got.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -81,14 +81,10 @@ pub async fn probe(addr: &str, magic: u64, budget: Duration) -> Outcome {
     let started = Instant::now();
     let deadline = started + budget;
 
-    let conn = match connect_happy_eyeballs_with_addr(addr, budget).await {
+    let conn = match connect(addr, budget).await {
         Ok(c) => c,
-        Err(e) => {
-            let stage = match e {
-                ConnectError::Dns(_) => Stage::Dns,
-                ConnectError::Connect(_) | ConnectError::Timeout => Stage::Connect,
-            };
-            return Err(Failed { stage, error: e.to_string() });
+        Err(e @ (ConnectError::Connect(_) | ConnectError::Timeout)) => {
+            return Err(Failed { stage: Stage::Connect, error: e.to_string() });
         }
     };
     let peer = conn.addr;

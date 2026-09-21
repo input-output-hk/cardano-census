@@ -62,14 +62,6 @@ pub struct Args {
     /// How many not-fully-reachable pools to name in the outreach series, largest stake first; 0 disables
     #[arg(long, default_value_t = 25)]
     pub top_pools: usize,
-
-    /// Try IPv4 first instead of IPv6
-    #[arg(long)]
-    pub prefer_ipv4: bool,
-
-    /// Milliseconds to wait for the preferred family before trying the other
-    #[arg(long, default_value_t = 500)]
-    pub happy_eyeballs_delay_ms: u64,
 }
 
 impl Args {

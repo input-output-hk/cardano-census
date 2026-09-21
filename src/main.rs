@@ -45,8 +45,6 @@ async fn main() {
 }
 
 async fn run(args: &Args) -> Result<()> {
-    net::set_happy_eyeballs_config(!args.prefer_ipv4, args.happy_eyeballs_delay_ms);
-
     let (snap, source) = match (&args.node_socket, &args.snapshot) {
         (Some(socket), _) => {
             let magic = args
