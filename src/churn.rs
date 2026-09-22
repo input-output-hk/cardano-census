@@ -176,7 +176,7 @@ mod tests {
     }
 
     fn down() -> Outcome {
-        Err(Failed { stage: Stage::Connect, error: "timeout".into() })
+        Err(Failed { stage: Stage::Connect, error: "timeout".into(), versions: None })
     }
 
     fn asn(n: u32) -> Option<AsInfo> {

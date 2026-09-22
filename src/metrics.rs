@@ -173,6 +173,43 @@ pub fn render(c: &Census, labels: &[(String, String)]) -> String {
         }
     }
 
+    out.family(
+        "n2n_version_offered",
+        "gauge",
+        "Node-to-node versions this census proposes in its handshake; the negotiated version can never exceed the highest",
+    );
+    for v in &c.n2n_offered {
+        out.sample("n2n_version_offered", &[("version", &v.to_string())], "1");
+    }
+    if !c.n2n_version_max.is_empty() {
+        out.family(
+            "relays_n2n_version_max",
+            "gauge",
+            "Relay entries by the highest node-to-node version their relay supports, from the handshake's query mode for relays that answered and from the refusal for relays sharing no version with the census",
+        );
+        for (v, n) in &c.n2n_version_max {
+            out.sample("relays_n2n_version_max", &[("version", &v.to_string())], &n.to_string());
+        }
+        out.family(
+            "relays_n2n_version_min",
+            "gauge",
+            "Relay entries by the lowest node-to-node version their relay still accepts, same sources",
+        );
+        for (v, n) in &c.n2n_version_min {
+            out.sample("relays_n2n_version_min", &[("version", &v.to_string())], &n.to_string());
+        }
+    }
+    out.gauge(
+        "relays_n2n_refused",
+        "Relay entries whose relay refused the handshake for want of a common version; their versions are counted above",
+        &c.n2n_refused.to_string(),
+    );
+    out.gauge(
+        "relays_n2n_version_unknown",
+        "Answering relay entries whose relay did not answer the version query, so they are missing from the version counts",
+        &c.n2n_version_unknown.to_string(),
+    );
+
     out.family("relays_failed", "gauge", "Relay entries that returned no tip, by the stage that failed");
     for s in Stage::ALL {
         let n = c.relays_failed.get(s.label()).copied().unwrap_or(0);

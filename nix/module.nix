@@ -231,9 +231,13 @@ in {
         # A failed refresh keeps the previous copy; the census runs either way.
         ExecStartPre = optional cfg.asnDatabase.enable "-${refreshAsnDatabase}";
         ExecStartPost = optional archive "-${archiveReport}";
-        # Worst case is every endpoint spending the whole budget, twice for the
-        # reversal pass, over as many as 4096 endpoints, plus the refreshes.
-        TimeoutStartSec = toString (2 * cfg.timeout * ((4096 + cfg.parallel - 1) / cfg.parallel) + 300);
+        # Worst case is every endpoint spending the whole budget in the probe
+        # and reversal passes and 15 s in the version query, SURVEY_BUDGET in
+        # src/main.rs, over as many as 4096 endpoints, plus the refreshes.
+        TimeoutStartSec = let
+          waves = (4096 + cfg.parallel - 1) / cfg.parallel;
+        in
+          toString (2 * cfg.timeout * waves + 15 * waves + 300);
 
         DynamicUser = true;
         SupplementaryGroups = optional fromNode cfg.nodeSocketGroup;

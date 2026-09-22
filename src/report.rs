@@ -69,6 +69,9 @@ struct RelayReport {
     family: Option<Family>,
     #[serde(skip_serializing_if = "Option::is_none")]
     n2n_version: Option<String>,
+    /// Every version the relay reported supporting, lowest first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    n2n_versions: Option<Vec<u64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tip: Option<Tip>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -154,6 +157,7 @@ pub fn render(
     outcomes: &[Option<Outcome>],
     srv_errors: &[Option<String>],
     shadow: &Shadow,
+    versions: &[Option<Vec<u64>>],
     previous: Option<&Previous>,
 ) -> Result<String> {
     let mut entry_endpoints: Vec<Vec<usize>> = vec![Vec::new(); entries.len()];
@@ -243,6 +247,7 @@ pub fn render(
             peer: None,
             family: None,
             n2n_version: None,
+            n2n_versions: chosen.and_then(|x| versions[x].clone()).or_else(|| census.entry_versions[i].clone()),
             tip: None,
             rtt_ms: None,
             lag_blocks: census.entry_tips[i].map(|t| t.lag_blocks),

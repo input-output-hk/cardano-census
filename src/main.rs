@@ -23,6 +23,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use cli::Args;
 use probe::{Failed, Outcome, Stage};
 
+/// Budget for the version query, which only goes to relays that just answered.
+/// The module's TimeoutStartSec bound in nix/module.nix repeats this number.
+const SURVEY_BUDGET: Duration = Duration::from_secs(15);
+
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -149,16 +153,17 @@ async fn run(args: &Args) -> Result<()> {
     let mut outcomes: Vec<Option<Outcome>> = vec![None; endpoints.len()];
     for (i, ep) in endpoints.iter().enumerate() {
         if let Some(err) = &ep.dns_error {
-            outcomes[i] = Some(Err(Failed { stage: Stage::Dns, error: err.clone() }));
+            outcomes[i] = Some(Err(Failed { stage: Stage::Dns, error: err.clone(), versions: None }));
         } else if !ep.addrs.is_empty() && ep.addrs.iter().all(|ip| asn::special_use(*ip).is_some()) {
             let ip = ep.addrs[0];
             let class = asn::special_use(ip).unwrap_or("reserved");
-            outcomes[i] = Some(Err(Failed { stage: Stage::Address, error: format!("{class} address {ip}, not probed") }));
+            outcomes[i] = Some(Err(Failed { stage: Stage::Address, error: format!("{class} address {ip}, not probed"), versions: None }));
         } else if !ipv6 && !ep.addrs.is_empty() && ep.addrs.iter().all(|ip| ip.is_ipv6()) {
             let ip = ep.addrs[0];
             outcomes[i] = Some(Err(Failed {
                 stage: Stage::Connect,
                 error: format!("IPv6 unreachable from the census host, {ip} not probed"),
+                versions: None,
             }));
         }
     }
@@ -183,6 +188,36 @@ async fn run(args: &Args) -> Result<()> {
 
     for (i, o) in probed {
         outcomes[i] = Some(o);
+    }
+
+    // Version survey: every endpoint that answered is asked, over one more
+    // connection, which node-to-node versions it supports. They answered
+    // seconds ago, so a short budget bounds the pass without losing answers.
+    let answering: Vec<usize> = (0..endpoints.len()).filter(|&i| matches!(outcomes[i], Some(Ok(_)))).collect();
+    let survey_budget = timeout.min(SURVEY_BUDGET);
+    eprintln!(
+        "asking {} answering endpoints for their node-to-node versions, {}s budget each",
+        answering.len(),
+        survey_budget.as_secs()
+    );
+    let surveyed: Vec<(usize, Result<Vec<u64>, String>)> = stream::iter(answering)
+        .map(|i| {
+            let addr = endpoints[i].key.clone();
+            async move { (i, probe::query_versions(&addr, magic, survey_budget).await) }
+        })
+        .buffer_unordered(parallel)
+        .collect()
+        .await;
+    let mut versions: Vec<Option<Vec<u64>>> = vec![None; endpoints.len()];
+    let mut unanswered = 0;
+    for (i, v) in surveyed {
+        match v {
+            Ok(v) => versions[i] = Some(v),
+            Err(_) => unanswered += 1,
+        }
+    }
+    if unanswered > 0 {
+        eprintln!("{unanswered} endpoints did not answer the version query");
     }
 
     // Shadow probe: every IPv4 literal at its octet reversal, see reversed.rs.
@@ -224,6 +259,7 @@ async fn run(args: &Args) -> Result<()> {
         &outcomes,
         &srv_errors,
         &shadow,
+        &versions,
         previous.as_ref(),
         args.fork_tolerance,
         asn_db.as_ref(),
@@ -241,7 +277,7 @@ async fn run(args: &Args) -> Result<()> {
     if let Some(path) = &args.report {
         output::write(
             path,
-            &report::render(&census, &snap, &entries, &endpoints, &outcomes, &srv_errors, &shadow, previous.as_ref())?,
+            &report::render(&census, &snap, &entries, &endpoints, &outcomes, &srv_errors, &shadow, &versions, previous.as_ref())?,
         )?;
     }
 

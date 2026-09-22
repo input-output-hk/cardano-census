@@ -237,6 +237,16 @@ pub struct Census {
     pub relays_failed_connect: BTreeMap<&'static str, u64>,
     /// Answering entries by negotiated node-to-node version.
     pub n2n_versions: BTreeMap<String, VersionGroup>,
+    /// The versions this census proposes; the negotiated one never exceeds the last.
+    pub n2n_offered: Vec<u64>,
+    /// Answering entries by the highest and lowest version their relay
+    /// supports, from the handshake's query mode.
+    pub n2n_version_max: BTreeMap<u64, u64>,
+    pub n2n_version_min: BTreeMap<u64, u64>,
+    /// Entries counted above from a refusal rather than an answer, and
+    /// answering entries whose relay did not answer the version query.
+    pub n2n_refused: u64,
+    pub n2n_version_unknown: u64,
     pub ipv4: Ipv4Reversal,
     /// Changes since the previous report, when one was readable.
     pub churn: Option<Churn>,
@@ -286,6 +296,9 @@ pub struct Census {
     /// Per entry, how its state changed since the previous report.
     #[serde(skip)]
     pub entry_change: Vec<Option<Change>>,
+    /// Per entry, the versions its relay reported supporting.
+    #[serde(skip)]
+    pub entry_versions: Vec<Option<Vec<u64>>>,
     /// The AS table with small ASes folded into `other`, for the metrics.
     #[serde(skip)]
     pub asn_metrics: Vec<AsnGroup>,
@@ -321,12 +334,15 @@ pub fn connect_reason(error: &str) -> &'static str {
 }
 
 /// Does `candidate` say more about an entry than `current`? A tip beats any
-/// failure, and a faster tip beats a slower one.
+/// failure, a faster tip beats a slower one, and among failures one that
+/// names the relay's versions beats one that does not, so a refusal for
+/// want of a common version is not lost behind another address's timeout.
 fn better(current: Option<&Outcome>, candidate: &Outcome) -> bool {
     match (current, candidate) {
         (None, _) => true,
         (Some(Err(_)), Ok(_)) => true,
         (Some(Ok(a)), Ok(b)) => b.rtt_ms < a.rtt_ms,
+        (Some(Err(a)), Err(b)) => b.versions.is_some() && a.versions.is_none(),
         _ => false,
     }
 }
@@ -355,6 +371,7 @@ pub fn best_outcomes(
             best[e] = Some(Err(Failed {
                 stage: Stage::Srv,
                 error: err.clone(),
+                versions: None,
             }));
         }
     }
@@ -370,6 +387,7 @@ pub fn build(
     outcomes: &[Option<Outcome>],
     srv_errors: &[Option<String>],
     shadow: &Shadow,
+    versions: &[Option<Vec<u64>>],
     previous: Option<&Previous>,
     fork_tolerance: u64,
     asn_db: Option<&AsnDb>,
@@ -555,6 +573,33 @@ pub fn build(
             g.stake_ratio += snap.pools[e.pool].relative_stake / per_pool_total[e.pool].max(1) as f64;
         }
     }
+    // What each entry's relay supports: from the version query for one that
+    // answered, or from the refusal for one that shares no version with us.
+    let entry_versions: Vec<Option<Vec<u64>>> = (0..entries.len())
+        .map(|i| match &entry_outcome[i] {
+            Some(Ok(_)) => entry_endpoints[i].iter().find_map(|&x| versions[x].clone()),
+            Some(Err(f)) => f.versions.clone(),
+            None => None,
+        })
+        .collect();
+    let mut n2n_version_max: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut n2n_version_min: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut n2n_refused = 0;
+    let mut n2n_version_unknown = 0;
+    for (i, v) in entry_versions.iter().enumerate() {
+        match (v, &entry_outcome[i]) {
+            (Some(v), _) if !v.is_empty() => {
+                *n2n_version_max.entry(*v.last().unwrap()).or_default() += 1;
+                *n2n_version_min.entry(*v.first().unwrap()).or_default() += 1;
+                if matches!(entry_outcome[i], Some(Err(_))) {
+                    n2n_refused += 1;
+                }
+            }
+            (_, Some(Ok(_))) => n2n_version_unknown += 1,
+            _ => {}
+        }
+    }
+    let n2n_offered = crate::probe::offered_versions(snap.network_magic);
 
     let (entry_asn, asn_table, asn_metrics) = asn_groups(
         entries,
@@ -649,6 +694,11 @@ pub fn build(
         relays_failed,
         relays_failed_connect,
         n2n_versions,
+        n2n_offered,
+        n2n_version_max,
+        n2n_version_min,
+        n2n_refused,
+        n2n_version_unknown,
         ipv4,
         churn,
 
@@ -683,6 +733,7 @@ pub fn build(
         thin_operators,
         entry_tips,
         entry_change,
+        entry_versions,
         asn_metrics,
         entry_asn,
         entry_probability,
@@ -1149,7 +1200,7 @@ mod tests {
     }
 
     fn failed() -> Outcome {
-        Err(Failed { stage: Stage::Connect, error: "timeout".into() })
+        Err(Failed { stage: Stage::Connect, error: "timeout".into(), versions: None })
     }
 
     fn endpoint(key: &str, entries: &[(usize, Option<u16>)]) -> Endpoint {
@@ -1228,6 +1279,23 @@ mod tests {
         // An unresolved name is one host.
         assert_eq!(distinct_endpoints(&g(&[&["dead.example:3001"], &["192.0.2.1:3001"]])), 2);
         assert_eq!(distinct_endpoints(&[]), 0);
+    }
+
+    #[test]
+    fn a_refusal_naming_versions_outranks_another_endpoints_failure() {
+        let entries = vec![Entry { pool: 0, address: "relays.example".into(), port: Some(3001) }];
+        let endpoints = vec![endpoint("192.0.2.1:3001", &[(0, None)]), endpoint("192.0.2.2:3001", &[(0, None)])];
+        let refused = Err(Failed {
+            stage: Stage::Handshake,
+            error: "rejected: VersionMismatch([15, 16])".into(),
+            versions: Some(vec![15, 16]),
+        });
+        // The plain timeout comes first in endpoint order and would otherwise stick.
+        let best = best_outcomes(&entries, &endpoints, &[Some(failed()), Some(refused.clone())], &[None]);
+        assert_eq!(best[0].as_ref().unwrap().as_ref().err().and_then(|f| f.versions.clone()), Some(vec![15, 16]));
+        // A tip still beats the refusal.
+        let best = best_outcomes(&entries, &endpoints, &[Some(refused), Some(reached())], &[None]);
+        assert!(best[0].as_ref().unwrap().is_ok());
     }
 
     #[test]
