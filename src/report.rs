@@ -120,15 +120,12 @@ struct TargetReport {
 }
 
 fn target_report(endpoint: &Endpoint, entry: usize, outcome: Option<&Outcome>, now: u64) -> TargetReport {
+    let slot = endpoint.entries.iter().position(|&e| e == entry);
     let mut t = TargetReport {
         endpoint: endpoint.key.clone(),
-        weight: endpoint
-            .entries
-            .iter()
-            .position(|&e| e == entry)
-            .and_then(|i| endpoint.weights[i]),
-        last_seen: endpoint.last_seen.unwrap_or(now),
-        remembered: endpoint.remembered,
+        weight: slot.and_then(|i| endpoint.weights[i]),
+        last_seen: slot.and_then(|i| endpoint.last_seen[i]).unwrap_or(now),
+        remembered: slot.is_some_and(|i| endpoint.remembered[i]),
         reachable: false,
         rtt_ms: None,
         stage: None,

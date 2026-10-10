@@ -106,6 +106,10 @@ pub fn special_use(ip: IpAddr) -> Option<&'static str> {
             }
         }
         IpAddr::V6(a) => {
+            // ::ffff:a.b.c.d is the IPv4 address in another spelling.
+            if let Some(v4) = a.to_ipv4_mapped() {
+                return special_use(IpAddr::V4(v4));
+            }
             let s = a.segments();
             let private = (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80;
             let reserved =
@@ -152,13 +156,13 @@ mod tests {
 
     #[test]
     fn special_use_splits_private_from_reserved_and_skips_public() {
-        for ip in ["10.46.135.225", "172.16.0.1", "192.168.1.1", "100.64.0.1", "169.254.1.1", "fd00::1", "fe80::1"] {
+        for ip in ["10.46.135.225", "172.16.0.1", "192.168.1.1", "100.64.0.1", "169.254.1.1", "fd00::1", "fe80::1", "::ffff:10.0.0.1"] {
             assert_eq!(special_use(ip.parse().unwrap()), Some("private"), "{ip}");
         }
-        for ip in ["127.0.0.1", "0.1.2.3", "224.0.0.1", "245.96.150.180", "198.18.0.1", "192.0.2.1", "::1", "ff02::1", "2001:db8::1"] {
+        for ip in ["127.0.0.1", "0.1.2.3", "224.0.0.1", "245.96.150.180", "198.18.0.1", "192.0.2.1", "::1", "ff02::1", "2001:db8::1", "::ffff:127.0.0.1"] {
             assert_eq!(special_use(ip.parse().unwrap()), Some("reserved"), "{ip}");
         }
-        for ip in ["20.61.229.103", "103.229.61.20", "1.1.1.1", "223.255.255.255", "2001:db9::1", "2a01:4f8::1"] {
+        for ip in ["20.61.229.103", "103.229.61.20", "1.1.1.1", "223.255.255.255", "2001:db9::1", "2a01:4f8::1", "::ffff:20.61.229.103"] {
             assert_eq!(special_use(ip.parse().unwrap()), None, "{ip}");
         }
     }

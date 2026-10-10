@@ -27,21 +27,12 @@
     iohk-nix,
     naersk,
   }: let
-    system = "x86_64-linux";
-    pkgs = import nixpkgs {inherit system;};
+    inherit (nixpkgs) lib;
+    systems = ["x86_64-linux" "aarch64-linux"];
+    forSystems = lib.genAttrs systems;
 
-    toolchain = with fenix.packages.${system};
-      combine [
-        stable.rustc
-        stable.cargo
-        stable.clippy
-        targets.x86_64-unknown-linux-musl.stable.rust-std
-      ];
-
-    naersk-lib = naersk.lib.${system}.override {
-      cargo = toolchain;
-      rustc = toolchain;
-    };
+    # A path: input carries no git information; the source hash still tells deploys apart.
+    gitRev = self.rev or self.dirtyRev or "src-${builtins.substring 0 8 (baseNameOf (toString self.outPath))}";
 
     crate = {
       pname = "cardano-census";
@@ -49,11 +40,23 @@
       src = ./.;
     };
 
-    # A path: input carries no git information; the source hash still tells deploys apart.
-    gitRev = self.rev or self.dirtyRev or "src-${builtins.substring 0 8 (baseNameOf (toString self.outPath))}";
-  in {
-    packages.${system} = rec {
-      default = cardano-census;
+    # Everything a system needs, built natively with a static musl target.
+    per = system: let
+      pkgs = import nixpkgs {inherit system;};
+      musl = "${pkgs.stdenv.hostPlatform.qemuArch}-unknown-linux-musl";
+      toolchain = with fenix.packages.${system};
+        combine [
+          stable.rustc
+          stable.cargo
+          stable.clippy
+          targets.${musl}.stable.rust-std
+        ];
+      naersk-lib = naersk.lib.${system}.override {
+        cargo = toolchain;
+        rustc = toolchain;
+      };
+    in rec {
+      inherit pkgs toolchain;
 
       cardano-census = naersk-lib.buildPackage (crate
         // {
@@ -61,18 +64,38 @@
             pkgsStatic.stdenv.cc
           ];
 
-          CARGO_BUILD_TARGET = "x86_64-unknown-linux-musl";
+          CARGO_BUILD_TARGET = musl;
 
           # Only the final link sees the revision, so every commit rebuilds the
           # binary while the dependency build stays cached.
           overrideMain = _: {GIT_REV = gitRev;};
         });
-    };
 
-    checks.${system} = {
       clippy = naersk-lib.buildPackage (crate // {mode = "clippy";});
       tests = naersk-lib.buildPackage (crate // {mode = "test";});
+
+      devShell = pkgs.mkShell {
+        nativeBuildInputs = [
+          toolchain
+          pkgs.rust-analyzer
+        ];
+      };
     };
+
+    builds = forSystems per;
+  in {
+    packages = forSystems (system: rec {
+      default = cardano-census;
+      inherit (builds.${system}) cardano-census;
+    });
+
+    checks = forSystems (system: {
+      inherit (builds.${system}) clippy tests;
+    });
+
+    devShells = forSystems (system: {
+      default = builds.${system}.devShell;
+    });
 
     nixosModules.default = {
       pkgs,
@@ -84,22 +107,17 @@
         lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.cardano-census;
     };
 
-    devShells.${system}.default = pkgs.mkShell {
-      nativeBuildInputs = [
-        toolchain
-        pkgs.rust-analyzer
-      ];
-    };
-
     hydraJobs = let
-      jobs = {
-        ${system} = {
+      pkgs = builds.x86_64-linux.pkgs;
+      jobs =
+        forSystems (system: {
           inherit (self.packages.${system}) cardano-census;
           inherit (self.checks.${system}) clippy tests;
           devShell = self.devShells.${system}.default;
+        })
+        // {
+          gitrev = pkgs.writeText "gitrev" gitRev;
         };
-        gitrev = pkgs.writeText "gitrev" gitRev;
-      };
     in
       jobs
       // {

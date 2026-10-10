@@ -309,22 +309,17 @@ fn decode_relay(d: &mut Decoder) -> Result<Relay> {
         }
         (Some(3), 1) => {
             let port = decode_port(d)?;
-            let octets = decode_u64_array(d, 4, "IPv4")?;
-            let ip = Ipv4Addr::new(octets[0] as u8, octets[1] as u8, octets[2] as u8, octets[3] as u8);
+            let o: [u8; 4] = decode_components(d, "IPv4")?;
             Ok(Relay {
-                address: ip.to_string(),
+                address: Ipv4Addr::from(o).to_string(),
                 port: Some(port),
             })
         }
         (Some(3), 2) => {
             let port = decode_port(d)?;
-            let w = decode_u64_array(d, 8, "IPv6")?;
-            let ip = Ipv6Addr::new(
-                w[0] as u16, w[1] as u16, w[2] as u16, w[3] as u16,
-                w[4] as u16, w[5] as u16, w[6] as u16, w[7] as u16,
-            );
+            let w: [u16; 8] = decode_components(d, "IPv6")?;
             Ok(Relay {
-                address: ip.to_string(),
+                address: Ipv6Addr::from(w).to_string(),
                 port: Some(port),
             })
         }
@@ -349,15 +344,21 @@ fn decode_domain(d: &mut Decoder) -> Result<String> {
     Ok(raw.trim_end_matches('.').to_string())
 }
 
-fn decode_u64_array(d: &mut Decoder, n: usize, what: &str) -> Result<Vec<u64>> {
-    let mut out = Vec::with_capacity(n);
+/// Exactly `N` integers, each within the component type's range; a
+/// component of 256 in an IPv4 address is a malformed response, not 0.
+fn decode_components<T: TryFrom<i128> + Copy + Default, const N: usize>(d: &mut Decoder, what: &str) -> Result<[T; N]> {
+    let mut out = [T::default(); N];
+    let mut n = 0;
     for_each(d, |d| {
         let v: i128 = d.int()?.into();
-        out.push(u64::try_from(v).map_err(|_| anyhow!("{what} component {v} out of range"))?);
+        if n < N {
+            out[n] = T::try_from(v).map_err(|_| anyhow!("{what} component {v} out of range"))?;
+        }
+        n += 1;
         Ok(())
     })?;
-    if out.len() != n {
-        bail!("{what} has {} components, expected {n}", out.len());
+    if n != N {
+        bail!("{what} has {n} components, expected {N}");
     }
     Ok(out)
 }
@@ -534,6 +535,28 @@ mod tests {
         rational(&mut e, 1, 100);
         e.array(0).unwrap();
         assert!(decode_response(&e.into_writer()).is_err());
+    }
+
+    #[test]
+    fn address_components_out_of_range_are_rejected() {
+        // [0, [0, ...]] wrapper aside, a relay [1, port, [10, 0, 0, 256]].
+        let mut e = Encoder::new(Vec::new());
+        e.array(3).unwrap().u8(1).unwrap().u16(3001).unwrap();
+        e.array(4).unwrap().u8(10).unwrap().u8(0).unwrap().u8(0).unwrap().u16(256).unwrap();
+        let bytes = e.into_writer();
+        let mut d = Decoder::new(&bytes);
+        let err = decode_relay(&mut d).unwrap_err().to_string();
+        assert!(err.contains("IPv4 component 256 out of range"), "{err}");
+
+        let mut e = Encoder::new(Vec::new());
+        e.array(3).unwrap().u8(2).unwrap().u16(3001).unwrap();
+        e.array(8).unwrap();
+        for w in [0x2001u32, 0xdb8, 0, 0, 0, 0, 0, 0x1_0000] {
+            e.u32(w).unwrap();
+        }
+        let bytes = e.into_writer();
+        let mut d = Decoder::new(&bytes);
+        assert!(decode_relay(&mut d).unwrap_err().to_string().contains("IPv6 component 65536 out of range"));
     }
 
     #[test]

@@ -4,7 +4,9 @@ use hickory_resolver::TokioResolver;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 use tokio::net::lookup_host;
+use tokio::time::timeout;
 
 use crate::net::format_host_port;
 use crate::pools::relay_key;
@@ -38,10 +40,19 @@ pub struct Endpoint {
     /// still be placed in a network.
     pub addrs: Vec<IpAddr>,
     pub dns_error: Option<String>,
-    /// Known only from an earlier run's report, not from this run's lookups.
-    pub remembered: bool,
-    /// When a remembered address was last returned by a lookup.
-    pub last_seen: Option<u64>,
+    /// Per entry, whether this address came from an earlier run's report
+    /// rather than this run's lookup of that entry's name, and when that
+    /// name's lookup last returned it. Two names sharing an address can
+    /// differ here, so the state is per entry, not per endpoint.
+    pub remembered: Vec<bool>,
+    pub last_seen: Vec<Option<u64>>,
+}
+
+impl Endpoint {
+    /// No lookup this run returned this address for any entry.
+    pub fn only_remembered(&self) -> bool {
+        !self.remembered.is_empty() && self.remembered.iter().all(|r| *r)
+    }
 }
 
 /// Addresses seen behind relay names in earlier runs, from the previous
@@ -96,7 +107,7 @@ struct Looked {
     dns_error: Option<String>,
 }
 
-pub async fn resolve(entries: &[Entry], parallel: usize, memory: Option<&Memory<'_>>) -> Resolved {
+pub async fn resolve(entries: &[Entry], parallel: usize, budget: Duration, memory: Option<&Memory<'_>>) -> Resolved {
     let parallel = parallel.max(1);
     let mut srv_errors: Vec<Option<String>> = vec![None; entries.len()];
     let mut targets: Vec<Target> = Vec::with_capacity(entries.len());
@@ -145,7 +156,7 @@ pub async fn resolve(entries: &[Entry], parallel: usize, memory: Option<&Memory<
         }
     }
 
-    let endpoints = group(&targets, parallel, memory).await;
+    let endpoints = group(&targets, parallel, budget, memory).await;
     Resolved { endpoints, srv_errors }
 }
 
@@ -181,7 +192,7 @@ async fn srv_targets(resolver: &TokioResolver, name: &str) -> SrvTargets {
         .collect())
 }
 
-async fn group(targets: &[Target], parallel: usize, memory: Option<&Memory<'_>>) -> Vec<Endpoint> {
+async fn group(targets: &[Target], parallel: usize, budget: Duration, memory: Option<&Memory<'_>>) -> Vec<Endpoint> {
     let mut looked: Vec<Looked> = Vec::with_capacity(targets.len());
     let mut hosts: Vec<(usize, String, u16)> = Vec::new();
 
@@ -198,19 +209,27 @@ async fn group(targets: &[Target], parallel: usize, memory: Option<&Memory<'_>>)
         }
     }
 
+    // The lookup gets the probe budget too, so a resolver that never answers
+    // cannot hold the whole run before a single probe has started.
     let looked_up: Vec<Looked> = stream::iter(hosts)
         .map(|(t, host, port)| async move {
-            match lookup_host((host.as_str(), port)).await {
-                Ok(addrs) => {
+            match timeout(budget, lookup_host((host.as_str(), port))).await {
+                Ok(Ok(addrs)) => {
                     let addrs: Vec<String> = addrs.map(|a| a.to_string()).collect();
                     let dns_error = addrs.is_empty().then(|| "no addresses".to_string());
                     Looked { target: t, literal: None, addrs, dns_error }
                 }
-                Err(e) => Looked {
+                Ok(Err(e)) => Looked {
                     target: t,
                     literal: None,
                     addrs: Vec::new(),
                     dns_error: Some(e.to_string()),
+                },
+                Err(_) => Looked {
+                    target: t,
+                    literal: None,
+                    addrs: Vec::new(),
+                    dns_error: Some(format!("lookup timed out after {}s", budget.as_secs())),
                 },
             }
         })
@@ -233,7 +252,7 @@ fn assemble(targets: &[Target], looked: &[Looked], memory: Option<&Memory<'_>>) 
     let mut groups: HashMap<String, Endpoint> = HashMap::new();
 
     // Two SRV records of one name landing on the same endpoint add their weights.
-    let push_entry = |ep: &mut Endpoint, entry: usize, weight: Option<u16>| {
+    let push_entry = |ep: &mut Endpoint, entry: usize, weight: Option<u16>, remembered: bool, last_seen: Option<u64>| {
         match ep.entries.iter().position(|&e| e == entry) {
             Some(i) => {
                 if let (Some(w), Some(have)) = (weight, ep.weights[i]) {
@@ -243,6 +262,8 @@ fn assemble(targets: &[Target], looked: &[Looked], memory: Option<&Memory<'_>>) 
             None => {
                 ep.entries.push(entry);
                 ep.weights.push(weight);
+                ep.remembered.push(remembered);
+                ep.last_seen.push(last_seen);
             }
         }
     };
@@ -262,10 +283,10 @@ fn assemble(targets: &[Target], looked: &[Looked], memory: Option<&Memory<'_>>) 
                 weights: Vec::new(),
                 addrs: ip.into_iter().collect(),
                 dns_error: l.dns_error.clone(),
-                remembered: false,
-                last_seen: None,
+                remembered: Vec::new(),
+                last_seen: Vec::new(),
             });
-            push_entry(ep, target.entry, target.weight);
+            push_entry(ep, target.entry, target.weight, false, None);
         }
     }
 
@@ -291,10 +312,10 @@ fn assemble(targets: &[Target], looked: &[Looked], memory: Option<&Memory<'_>>) 
                     weights: Vec::new(),
                     addrs: vec![sock.ip()],
                     dns_error: None,
-                    remembered: true,
-                    last_seen: Some(*last_seen),
+                    remembered: Vec::new(),
+                    last_seen: Vec::new(),
                 });
-                push_entry(ep, target.entry, None);
+                push_entry(ep, target.entry, None, true, Some(*last_seen));
             }
         }
     }
@@ -339,7 +360,7 @@ mod tests {
         assert!(dead.addrs.is_empty());
         let srv = eps.iter().find(|e| e.key == "192.0.2.9:6000").unwrap();
         assert_eq!(srv.weights, vec![Some(10)]);
-        assert!(eps.iter().all(|e| !e.remembered));
+        assert!(eps.iter().all(|e| !e.only_remembered()));
     }
 
     #[test]
@@ -349,12 +370,14 @@ mod tests {
             target(1, "1.2.3.4", 3001, None),
             target(2, "srv.example", 6000, Some(5)),
             target(3, "gone.example", 3001, None),
+            target(4, "other.example", 3001, None),
         ];
         let looked = vec![
             Looked { target: 0, literal: None, addrs: vec!["192.0.2.1:3001".into()], dns_error: None },
             Looked { target: 1, literal: Some("1.2.3.4:3001".into()), addrs: vec![], dns_error: None },
             Looked { target: 2, literal: None, addrs: vec!["192.0.2.9:6000".into()], dns_error: None },
             Looked { target: 3, literal: None, addrs: vec![], dns_error: Some("no such host".into()) },
+            Looked { target: 4, literal: None, addrs: vec!["192.0.2.5:3001".into()], dns_error: None },
         ];
         let now = 1_000_000;
         let mem = HashMap::from([
@@ -362,6 +385,8 @@ mod tests {
                 ("192.0.2.1:3001".to_string(), now - 60),
                 ("192.0.2.2:3001".to_string(), now - 3600),
                 ("192.0.2.3:3001".to_string(), now - REMEMBER_SECS - 1),
+                // other.example resolves to this one now; relays.example only remembers it.
+                ("192.0.2.5:3001".to_string(), now - 7200),
             ]),
             ("1.2.3.4:3001".to_string(), vec![("9.9.9.9:3001".to_string(), now)]),
             ("srv.example".to_string(), vec![("192.0.2.8:6000".to_string(), now)]),
@@ -371,14 +396,19 @@ mod tests {
         let keys: Vec<&str> = eps.iter().map(|e| e.key.as_str()).collect();
         assert_eq!(
             keys,
-            vec!["1.2.3.4:3001", "192.0.2.1:3001", "192.0.2.2:3001", "192.0.2.9:6000", "gone.example:3001"],
+            vec!["1.2.3.4:3001", "192.0.2.1:3001", "192.0.2.2:3001", "192.0.2.5:3001", "192.0.2.9:6000", "gone.example:3001"],
             "one remembered address added, the stale one dropped, literals and SRV untouched, a name that failed to resolve gets no memory"
         );
         let gone = eps.iter().find(|e| e.key == "gone.example:3001").unwrap();
         assert_eq!(gone.dns_error.as_deref(), Some("no such host"));
         let fresh = eps.iter().find(|e| e.key == "192.0.2.1:3001").unwrap();
-        assert!(!fresh.remembered, "returned this run, so not remembered");
+        assert!(!fresh.only_remembered(), "returned this run, so not remembered");
         let old = eps.iter().find(|e| e.key == "192.0.2.2:3001").unwrap();
-        assert_eq!((old.remembered, old.last_seen, old.entries.as_slice(), old.weights.as_slice()), (true, Some(now - 3600), &[0][..], &[None][..]));
+        assert!(old.only_remembered());
+        assert_eq!((old.entries.as_slice(), old.weights.as_slice(), old.remembered.as_slice(), old.last_seen.as_slice()), (&[0][..], &[None][..], &[true][..], &[Some(now - 3600)][..]));
+        // Shared address: fresh for the name that resolved it, remembered for the other.
+        let shared = eps.iter().find(|e| e.key == "192.0.2.5:3001").unwrap();
+        assert!(!shared.only_remembered());
+        assert_eq!((shared.entries.as_slice(), shared.remembered.as_slice(), shared.last_seen.as_slice()), (&[4, 0][..], &[false, true][..], &[None, Some(now - 7200)][..]));
     }
 }

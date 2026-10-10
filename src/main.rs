@@ -37,6 +37,10 @@ fn unix_now() -> u64 {
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+    if let Some(name) = args.duplicate_label() {
+        eprintln!("cardano-census: --label {name} given more than once");
+        std::process::exit(2);
+    }
     // A run that systemd stops still leaves success 0 behind rather than the
     // previous run's file.
     let result = tokio::select! {
@@ -123,9 +127,10 @@ async fn run(args: &Args) -> Result<()> {
 
     let memory = previous.as_ref().map(|p| resolve::Memory { targets: &p.targets, now: unix_now() });
 
+    let timeout = Duration::from_secs(args.timeout);
     let started = Instant::now();
-    let resolve::Resolved { endpoints, srv_errors } = resolve::resolve(&entries, args.parallel, memory.as_ref()).await;
-    let remembered = endpoints.iter().filter(|e| e.remembered).count();
+    let resolve::Resolved { endpoints, srv_errors } = resolve::resolve(&entries, args.parallel, timeout, memory.as_ref()).await;
+    let remembered = endpoints.iter().filter(|e| e.only_remembered()).count();
     if remembered > 0 {
         eprintln!("{remembered} endpoints remembered from earlier runs' lookups");
     }
@@ -141,7 +146,6 @@ async fn run(args: &Args) -> Result<()> {
         srv_total,
     );
 
-    let timeout = Duration::from_secs(args.timeout);
     let parallel = args.parallel.max(1);
     // An endpoint that resolved only to private or reserved space is never
     // dialled: nothing public can live there, and loopback or 0.0.0.0 would

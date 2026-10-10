@@ -545,14 +545,15 @@ pub fn build(
     let mut srv_endpoints_reachable = 0;
     for (i, ep) in endpoints.iter().enumerate() {
         let reached = matches!(outcomes[i], Some(Ok(_)));
-        let mut is_srv_target = false;
-        for &e in &ep.entries {
-            if entries[e].is_srv() {
-                is_srv_target = true;
-                let set = srv_sets.entry(entries[e].address.clone()).or_default();
-                set.targets += 1;
-                set.reachable += reached as u64;
-            }
+        // Two pools listing the same SRV name share its entries on this
+        // endpoint; the name has one target here, not two.
+        let names: std::collections::BTreeSet<&str> =
+            ep.entries.iter().filter(|&&e| entries[e].is_srv()).map(|&e| entries[e].address.as_str()).collect();
+        let is_srv_target = !names.is_empty();
+        for name in names {
+            let set = srv_sets.entry(name.to_string()).or_default();
+            set.targets += 1;
+            set.reachable += reached as u64;
         }
         if is_srv_target {
             srv_endpoints_total += 1;
@@ -688,7 +689,7 @@ pub fn build(
             .iter()
             .filter(|o| !matches!(o, Some(Err(f)) if matches!(f.stage, Stage::Dns | Stage::Address) || f.error.ends_with("not probed")))
             .count() as u64,
-        endpoints_remembered: endpoints.iter().filter(|e| e.remembered).count() as u64,
+        endpoints_remembered: endpoints.iter().filter(|e| e.only_remembered()).count() as u64,
         relays_reachable_v4,
         relays_reachable_v6,
         relays_failed,
@@ -1210,8 +1211,8 @@ mod tests {
             weights: entries.iter().map(|e| e.1).collect(),
             addrs: Vec::new(),
             dns_error: None,
-            remembered: false,
-            last_seen: None,
+            remembered: entries.iter().map(|_| false).collect(),
+            last_seen: entries.iter().map(|_| None).collect(),
         }
     }
 

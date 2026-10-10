@@ -68,6 +68,12 @@ impl Args {
     pub fn output_is_stdout(&self) -> bool {
         self.output.as_os_str() == "-"
     }
+
+    /// A label name given twice; Prometheus allows each name once per series.
+    pub fn duplicate_label(&self) -> Option<&str> {
+        let mut seen = std::collections::HashSet::new();
+        self.labels.iter().map(|(k, _)| k.as_str()).find(|k| !seen.insert(*k))
+    }
 }
 
 /// `KEY=VALUE` with a Prometheus label name as the key.
@@ -85,4 +91,17 @@ fn parse_label(s: &str) -> Result<(String, String), String> {
         return Err(format!("{key:?} is not a valid label name"));
     }
     Ok((key.to_string(), value.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_label_names_are_caught() {
+        let args = Args::try_parse_from(["cardano-census", "--snapshot", "s.json", "--label", "env=a", "--label", "group=g", "--label", "env=b"]).unwrap();
+        assert_eq!(args.duplicate_label(), Some("env"));
+        let args = Args::try_parse_from(["cardano-census", "--snapshot", "s.json", "--label", "env=a", "--label", "group=g"]).unwrap();
+        assert_eq!(args.duplicate_label(), None);
+    }
 }
